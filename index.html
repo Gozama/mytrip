@@ -136,7 +136,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-24-f";
+const APP_VER = "2026-11-24-g";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -533,8 +533,8 @@ async function draw(day, picks, pts, seq){
         <option value="start">ใกล้จุดเริ่มต้น</option>
         ${vias.map((v, j) => `<option value="via${j}">ใกล้ ${esc(v.name)}</option>`).join("")}</select></label>
     <div id="recBox" style="margin-top:10px"></div>
-    <div class="meta" style="margin-top:10px">${gkey ? "🔑 ใช้คะแนนรีวิวจาก Google (ตั้ง key แล้ว)" : "ตอนนี้ใช้ข้อมูลฟรีจาก OpenStreetMap (ไม่มีคะแนนรีวิว)"}
-      ${guest ? "" : `· <a href="#" id="recSet">ตั้งค่า API key</a>`}</div>
+    <div class="meta" style="margin-top:10px"><span id="gline">${googleLine()}</span>
+      ${guest ? "" : `· <a href="#" id="recSet">ตั้งค่า</a>`}</div>
   </div>
 
   <div class="card">
@@ -590,6 +590,7 @@ async function draw(day, picks, pts, seq){
   document.querySelectorAll("[data-vmv]").forEach(b => b.onclick = () => { const [j, d] = b.dataset.vmv.split(":").map(Number); moveVia(j, d); });
   document.querySelectorAll("[data-vdel]").forEach(b => b.onclick = () => { if (confirm("ลบจุดหมายหลักนี้?")) dropVia(+b.dataset.vdel); });
   $("#recScope").onchange = e => { recScope = e.target.value; if (recStarted) runRec(recCat); showRec(); };
+  refreshGoogleUI();
   if ($("#recSet")) $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
   if ($("#shLink")){ $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile; }
   $("#shSync").onclick = openSync;
@@ -791,6 +792,8 @@ function finalize(items, scope, k){
   return out.slice(0, 30);
 }
 async function gSearch(q, c, r, minRating){
+  if (!googleAllowed()) throw new Error(cfgNow().on ? "ถึงเพดานการใช้เดือนนี้แล้ว" : "เจ้าของปิดการใช้ Google อยู่");
+  track("search");
   const body = { textQuery:q, languageCode:"th", pageSize:20,
     locationBias:{ circle:{ center:{ latitude:c.lat, longitude:c.lng }, radius:r } } };
   if (minRating) body.minRating = minRating;
@@ -882,6 +885,7 @@ async function runRec(k, force){
   if (recMem[key][k] && !force){ showRec(); return; }
   if (recMem[key][k]?.loading) return;
   if (!curPts || !routeData){ return; }
+  if (!gkey && sync && cfgNow().gid && !unlockAsked){ unlockAsked = true; openUnlock(); }   // ผู้ร่วมทริป: ถามรหัสผ่านครั้งแรก
   recMem[key][k] = { loading:true };
   showRec();
   const day = trip.days[d], path = routePath(curPts);
@@ -951,7 +955,9 @@ function showRec(){
   // รูปประกอบ
   if (slot && slot.items) box.querySelectorAll(".ph").forEach(el => {
     const p = slot.items[+el.dataset.i]; if (!p) return;
-    const put = u => { if (!u || !el.isConnected) return; const im = new Image(); im.alt = ""; im.referrerPolicy = /googleapis\.com/.test(u) ? "origin" : "no-referrer";  // รูปจาก Google ต้องส่ง referrer เพื่อให้ผ่านการจำกัดเว็บของ key
+    const put = u => { if (!u || !el.isConnected) return;
+      if (/googleapis\.com/.test(u)){ if (!googleAllowed()) return; if (!countedPhotos.has(u)){ countedPhotos.add(u); track("photo"); } }
+      const im = new Image(); im.alt = ""; im.referrerPolicy = /googleapis\.com/.test(u) ? "origin" : "no-referrer";  // รูปจาก Google ต้องส่ง referrer เพื่อให้ผ่านการจำกัดเว็บของ key
       im.onload = () => el.appendChild(im); im.src = u; };
     if (p.photo !== undefined && p.photo !== null && p.photo !== "") put(p.photo);
     else if (p.photo === undefined || p.photo === null){ osmPhoto(p).then(u => { p.photo = u || ""; put(u); }); }
@@ -1096,7 +1102,7 @@ async function pushNow(){
   if (!sync) return;
   const rev = Math.max(Date.now(), lastRev + 1);
   try{
-    const r = await fetch(docUrl(), { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
+    const r = await fetch(docUrl(), { method:"PATCH", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
     if (!r.ok) throw new Error(r.status);
     lastRev = rev; syncErr = false;
   }catch(e){ syncErr = true; setTimeout(schedulePush, 8000); }
@@ -1128,6 +1134,8 @@ async function syncTick(){
       const doc = await fetchJSON(docUrl(), 10000);
       if (doc && doc.rev > lastRev){ lastRev = doc.rev; if (doc.by !== cid) applyWhenIdle(doc); }
     }
+    const c = await fetchJSON(`${sync.db}/trips/${sync.id}/ctl.json`, 8000);   // การตั้งค่า Google + ตัวนับของกลุ่ม (เล็กมาก)
+    ctl = c || {}; checkGroupKey(); refreshGoogleUI();
     syncErr = false;
   }catch(e){ syncErr = true; }
   syncBusy = false; setStat();
@@ -1140,7 +1148,7 @@ async function startSync(dbRaw){
     const r = await fetch(`${db}/trips/${id}.json`, { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
     if (!r.ok) throw new Error(r.status);
   }catch(e){ alert("สร้างทริปร่วมไม่สำเร็จ ตรวจที่อยู่ฐานข้อมูลและ Rules (รหัสข้อผิดพลาด: " + (e.message || e) + ")"); return false; }
-  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setRole("owner"); setStat(); return true;
+  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setRole("owner"); setStat(); syncTick(); return true;
 }
 async function joinSync(db, id){
   try{
@@ -1148,10 +1156,14 @@ async function joinSync(db, id){
     if (!doc || !doc.plan){ alert("ไม่พบทริปนี้ (ลิงก์เชิญอาจผิด หรือถูกลบแล้ว)"); return false; }
     if (trip.days.length && !confirm("เข้าร่วมทริปร่วม? แผนในเครื่องนี้จะถูกแทนที่ด้วยแผนของกลุ่ม")) return false;
     sync = { db, id }; lastRev = doc.rev || 0; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db);
-    setRole("guest"); applyRemote(doc); setStat(); return true;
+    setRole("guest"); applyRemote(doc); setStat(); syncTick(); return true;
   }catch(e){ alert("เข้าร่วมไม่สำเร็จ ตรวจอินเทอร์เน็ตและลิงก์เชิญ"); return false; }
 }
-function leaveSync(){ sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); setRole("owner"); setStat(); if (trip.days.length) update(); }
+function leaveSync(){
+  sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); ctl = null;
+  if (gsrc === "group") dropGroupKey();           // key ที่ได้มาจากกลุ่ม ต้องออกจากเครื่องเมื่อออกจากกลุ่ม
+  setRole("owner"); setStat(); if (trip.days.length) update();
+}
 async function copyText(t, okMsg){
   try{ await navigator.clipboard.writeText(t); alert(okMsg); } catch(e){ prompt("คัดลอกข้อความนี้:", t); }
 }
@@ -1218,6 +1230,127 @@ function initSync(){
   syncTick();
 }
 
+/* ---------- ใช้ Google ร่วมกันทั้งกลุ่ม: เข้ารหัส key / ตัวนับการใช้งาน / สวิตช์เปิด-ปิด ---------- */
+// หมายเหตุ: ตัวนับ สวิตช์ และเพดาน ตรวจที่ฝั่งแอป (ประมาณการ) ตัวปิดจริงคือ Quota/Budget ใน Google Cloud
+function ymd(){ const d = new Date(), p = n => String(n).padStart(2, "0"); return { ym: d.getFullYear() + "-" + p(d.getMonth() + 1), d: p(d.getDate()) }; }
+let localUse = ls.get("trip.use.v1", {}), localCfg = ls.get("trip.gcfg.v1", { on:true, limit:800 });
+let ctl = null, unlockAsked = false, gsrc = ls.get("trip.gsrc.v1", gkey ? "own" : "");
+const countedPhotos = new Set();
+function cfgNow(){
+  const c = (sync && ctl && ctl.cfg) ? ctl.cfg : localCfg;
+  const lim = Number(c.limit); return { on: c.on !== false, limit: Number.isFinite(lim) ? lim : 800, gid: (sync && ctl && ctl.cfg && ctl.cfg.gid) || null };
+}
+function useNow(){
+  const { ym, d } = ymd(), u = (sync ? (ctl && ctl.use && ctl.use[ym]) : localUse[ym]) || {};
+  return { search: u.search || 0, photo: u.photo || 0, map: u.map || 0, total: u.total || 0, today: u["d" + d] || 0 };
+}
+function track(kind){
+  const { ym, d } = ymd();
+  const bump = o => { const m = o[ym] = o[ym] || {}; m[kind] = (m[kind] || 0) + 1; m.total = (m.total || 0) + 1; m["d" + d] = (m["d" + d] || 0) + 1; };
+  if (sync){
+    ctl = ctl || {}; ctl.use = ctl.use || {}; bump(ctl.use);
+    const inc = { ".sv": { increment: 1 } }, body = {};
+    body[ym + "/" + kind] = inc; body[ym + "/total"] = inc; body[ym + "/d" + d] = inc;
+    fetch(`${sync.db}/trips/${sync.id}/ctl/use.json`, { method:"PATCH", body: JSON.stringify(body) }).catch(() => {});
+  } else { bump(localUse); ls.set("trip.use.v1", localUse); }
+  refreshGoogleUI();
+}
+function googleAllowed(){
+  if (!gkey) return false;
+  const c = cfgNow(); if (!c.on) return false;
+  return !(c.limit > 0 && useNow().total >= c.limit);
+}
+function googleLine(){
+  const c = cfgNow(), u = useNow(), q = ` · เดือนนี้ใช้ไป ${u.total}${c.limit > 0 ? "/" + c.limit : ""} ครั้ง`;
+  if (gkey) return googleAllowed() ? `🟢 ใช้ Google (รีวิว+รูป)${q}`
+    : `⏸ ${!c.on ? "เจ้าของปิดการใช้ Google อยู่" : "ถึงเพดานเดือนนี้แล้ว"} → ใช้ข้อมูลฟรีจาก OpenStreetMap${q}`;
+  if (sync && c.gid) return `🔒 เจ้าของแชร์ Google ให้กลุ่มแล้ว <a href="#" id="gunlock">ใส่รหัสผ่านเพื่อใช้</a>${q}`;
+  return "ตอนนี้ใช้ข้อมูลฟรีจาก OpenStreetMap (ไม่มีคะแนนรีวิว)";
+}
+function renderUse(){
+  const e = $("#guse"); if (!e) return;
+  const c = cfgNow(), u = useNow(), pct = c.limit > 0 ? Math.min(100, Math.round(u.total / c.limit * 100)) : 0;
+  e.innerHTML = `เดือนนี้ใช้ไป <b>${u.total}${c.limit > 0 ? " / " + c.limit : ""}</b> ครั้ง (ค้นหา ${u.search} · รูป ${u.photo} · แผนที่ ${u.map}) · วันนี้ ${u.today}
+    <div style="height:8px;background:var(--line);border-radius:6px;margin:6px 0"><div style="height:8px;width:${pct}%;background:${pct >= 90 ? "var(--red)" : "var(--pri)"};border-radius:6px"></div></div>
+    <span style="font-size:12px">* นับเฉพาะการเรียกจากแอปนี้ (ประมาณการ) ยอดจริงดูที่ Google Cloud → Metrics</span>`;
+}
+function refreshGoogleUI(){
+  const g = $("#gline");
+  if (g){ g.innerHTML = googleLine(); const a = $("#gunlock"); if (a) a.onclick = ev => { ev.preventDefault(); openUnlock(); }; }
+  renderUse();
+}
+function checkGroupKey(){        // เจ้าของเลิกแชร์/เปลี่ยน key → ลบ key ที่ได้จากกลุ่มออกจากเครื่องนี้
+  if (gsrc !== "group" || ctl === null) return;
+  if ((ctl.cfg && ctl.cfg.gid || null) !== ls.get("trip.gid.v1", "")) dropGroupKey();
+}
+function dropGroupKey(){
+  gkey = ""; ls.set(GKEY, ""); gsrc = ""; ls.set("trip.gsrc.v1", ""); ls.set("trip.gid.v1", ""); recMem = {}; refreshGoogleUI();
+}
+const b64u = u => btoa(String.fromCharCode(...new Uint8Array(u)));
+const unb64 = b => Uint8Array.from(atob(b), c => c.charCodeAt(0));
+async function deriveKey(pw, salt){
+  const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name:"PBKDF2", salt, iterations:200000, hash:"SHA-256" }, km, { name:"AES-GCM", length:256 }, false, ["encrypt", "decrypt"]);
+}
+async function encKey(plain, pw){
+  const salt = crypto.getRandomValues(new Uint8Array(16)), iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name:"AES-GCM", iv }, await deriveKey(pw, salt), new TextEncoder().encode(plain));
+  return { v:1, s:b64u(salt), i:b64u(iv), c:b64u(ct) };
+}
+async function decKey(o, pw){
+  const pt = await crypto.subtle.decrypt({ name:"AES-GCM", iv:unb64(o.i) }, await deriveKey(pw, unb64(o.s)), unb64(o.c));
+  return new TextDecoder().decode(pt);
+}
+async function saveCfg(patch){
+  const next = Object.assign({}, cfgNow(), patch);
+  if (sync){
+    const body = { on: next.on, limit: next.limit }; if ("gid" in patch) body.gid = patch.gid;
+    const r = await fetch(`${sync.db}/trips/${sync.id}/ctl/cfg.json`, { method:"PATCH", body: JSON.stringify(body) });
+    if (!r.ok) throw new Error(r.status);
+    ctl = ctl || {}; ctl.cfg = Object.assign({}, ctl.cfg, body);
+  } else { localCfg = { on: next.on, limit: next.limit }; ls.set("trip.gcfg.v1", localCfg); }
+  refreshGoogleUI();
+}
+async function shareGoogleKey(pw){
+  if (!sync) throw new Error("ต้องเปิด \"แชร์ร่วมกัน\" ก่อน");
+  if (!gkey) throw new Error("ยังไม่ได้ตั้ง Google API key ในเครื่องนี้");
+  if (!(window.crypto && crypto.subtle)) throw new Error("เบราว์เซอร์นี้ไม่รองรับการเข้ารหัส (ต้องเปิดผ่านเว็บ https)");
+  if (String(pw).length < 10) throw new Error("รหัสผ่านต้องยาวอย่างน้อย 10 ตัวอักษร");
+  const gid = randId(10), blob = await encKey(gkey, pw); blob.gid = gid;
+  const r = await fetch(`${sync.db}/trips/${sync.id}/gkey.json`, { method:"PUT", body: JSON.stringify(blob) });
+  if (!r.ok) throw new Error(r.status);
+  await saveCfg({ gid }); gsrc = "own"; ls.set("trip.gsrc.v1", "own");
+}
+async function unshareGoogleKey(){
+  await fetch(`${sync.db}/trips/${sync.id}/gkey.json`, { method:"PUT", body:"null" });
+  await saveCfg({ gid: null });
+}
+async function unlockGoogle(pw){
+  if (!sync) throw new Error("ยังไม่ได้เข้าร่วมทริปที่แชร์ร่วมกัน");
+  if (!(window.crypto && crypto.subtle)) throw new Error("เบราว์เซอร์นี้ไม่รองรับการถอดรหัส (ต้องเปิดผ่านเว็บ https)");
+  const o = await fetchJSON(`${sync.db}/trips/${sync.id}/gkey.json`, 10000);
+  if (!o || !o.c) throw new Error("เจ้าของยังไม่ได้แชร์ key");
+  let k; try{ k = await decKey(o, pw); }catch(e){ throw new Error("รหัสผ่านไม่ถูกต้อง"); }
+  gkey = k; ls.set(GKEY, k); gsrc = "group"; ls.set("trip.gsrc.v1", "group"); ls.set("trip.gid.v1", o.gid || "");
+  recMem = {}; refreshGoogleUI();
+}
+function openUnlock(){
+  const m = $("#modal"); m.hidden = false;
+  m.innerHTML = `<div class="mbox"><h2>🔒 ใช้ Google ร่วมกับกลุ่ม</h2>
+    <p class="meta">เจ้าของทริปแชร์ Google ให้ผู้ร่วมทริปแล้ว ใส่รหัสผ่านที่เจ้าของบอก (กรอกครั้งเดียว เครื่องนี้จะจำไว้) เพื่อดูคะแนนรีวิวและรูปจาก Google</p>
+    <input class="f" id="upw" type="password" placeholder="รหัสผ่านจากเจ้าของ" autocomplete="off">
+    <div class="warn" id="uerr" style="margin-top:6px"></div>
+    <div class="row"><button class="b p" id="ugo">ปลดล็อก</button><button class="b" id="ux">ไว้ทีหลัง</button></div></div>`;
+  $("#upw").focus();
+  const go = async () => {
+    const b = $("#ugo"); b.disabled = true; b.textContent = "กำลังถอดรหัส…"; $("#uerr").textContent = "";
+    try{ await unlockGoogle($("#upw").value); closeModal(); }
+    catch(e){ $("#uerr").textContent = e.message || "ปลดล็อกไม่สำเร็จ"; b.disabled = false; b.textContent = "ปลดล็อก"; }
+  };
+  $("#ugo").onclick = go; $("#upw").onkeydown = e => { if (e.key === "Enter") go(); };
+  $("#ux").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
+}
+
 /* ---------- เมนูตั้งค่า ---------- */
 function openSettings(){
   if (isGuest()) return;
@@ -1241,6 +1374,18 @@ function openSettings(){
     </div>
     <p class="meta">key เก็บไว้ในเครื่องนี้เท่านั้น ไม่ถูกส่งไปที่อื่นนอกจาก Google
       อย่าใส่ key ลงในไฟล์ที่นำไปเผยแพร่</p>
+    <div class="cat">📊 การใช้ Google และการควบคุม</div>
+    <div class="meta" id="guse" style="margin-top:4px"></div>
+    <label class="meta" style="display:flex;gap:6px;align-items:center;margin-top:8px"><input type="checkbox" id="gon"> อนุญาตให้ใช้ Google (ปิด = ทุกเครื่องในกลุ่มใช้ข้อมูลฟรี)</label>
+    <div class="row"><span class="meta">เพดานต่อเดือน</span><input class="f" id="glim" type="number" min="0" inputmode="numeric" style="width:110px"><span class="meta">ครั้ง (0 = ไม่จำกัด)</span>
+      <button class="b" id="gcfg">บันทึกเพดาน</button></div>
+    ${sync ? `<div class="cat">👥 แชร์ key ให้ผู้ร่วมทริป</div>
+      <p class="meta" style="margin:4px 0">เข้ารหัส key ด้วยรหัสผ่านก่อนเก็บที่ Firebase ผู้ร่วมทริปกรอกรหัสผ่านครั้งเดียวเพื่อใช้ Google
+        (คนที่รู้รหัสผ่านและใช้แอปอยู่ ยังเปิดดู key ผ่านเครื่องมือเบราว์เซอร์ได้ จึงควรแชร์เฉพาะคนที่ไว้ใจ)</p>
+      <div class="meta" id="gshst">${cfgNow().gid ? "🟢 แชร์ key ให้กลุ่มอยู่" : "ยังไม่ได้แชร์ key"}</div>
+      <input class="f" id="gpw" type="password" placeholder="ตั้งรหัสผ่าน (ยาวอย่างน้อย 10 ตัวอักษร)" autocomplete="off" style="margin-top:6px">
+      <div class="row"><button class="b p" id="gshare">เข้ารหัสและแชร์ key</button><button class="b" id="gunshare">ยกเลิกการแชร์ key</button></div>`
+      : `<p class="meta">เปิด "แชร์ร่วมกัน" ก่อน จึงจะแชร์ key ให้ผู้ร่วมทริปได้</p>`}
     <div class="cat">🗺️ แผนที่</div>
     <select class="f" id="mapsel" style="margin-top:6px">
       <option value="osm">แผนที่ปกติ (ฟรี ไม่ต้องใช้ key)</option>
@@ -1260,14 +1405,29 @@ function openSettings(){
   };
   $("#gshow").onchange = e => { $("#gkey").type = e.target.checked ? "text" : "password"; };
   $("#gsave").onclick = () => {
-    gkey = $("#gkey").value.trim(); ls.set(GKEY, gkey);
+    gkey = $("#gkey").value.trim(); ls.set(GKEY, gkey); gsrc = gkey ? "own" : ""; ls.set("trip.gsrc.v1", gsrc);
     $("#gst").textContent = mask(gkey); recMem = {}; mapForceOsm = false;
     const b = $("#gsave"); b.textContent = "✓ บันทึกแล้ว"; setTimeout(() => { b.textContent = "บันทึก"; }, 1500);
     if (mapPref === "google") switchMap(); else if (trip.days[cur]) showRec();
   };
-  $("#gclear").onclick = () => { gkey = ""; ls.set(GKEY, ""); $("#gkey").value = ""; $("#gst").textContent = mask(""); recMem = {}; if (mapPref === "google") switchMap(); else showRec(); };
+  $("#gclear").onclick = () => { gkey = ""; ls.set(GKEY, ""); gsrc = ""; ls.set("trip.gsrc.v1", ""); $("#gkey").value = ""; $("#gst").textContent = mask(""); recMem = {}; if (mapPref === "google") switchMap(); else showRec(); };
   $("#gcache").onclick = () => { cache = {}; ls.set(LS.cache, cache); recMem = {}; alert("ล้างแคชแล้ว ข้อมูลจะถูกคำนวณใหม่เมื่อเปิดครั้งถัดไป"); };
   $("#gall").onclick = () => { if (confirm("ล้างกำหนดการและข้อมูลรถทั้งหมด? (API key และธีมจะยังอยู่)")){ closeModal(); resetAll(); } };
+  renderUse(); $("#gon").checked = cfgNow().on; $("#glim").value = cfgNow().limit;
+  $("#gon").onchange = async e => { try{ await saveCfg({ on: e.target.checked }); }catch(x){ alert("บันทึกไม่สำเร็จ"); e.target.checked = !e.target.checked; } };
+  $("#gcfg").onclick = async () => { try{ await saveCfg({ limit: Math.max(0, +$("#glim").value || 0) }); alert("บันทึกเพดานแล้ว"); }catch(x){ alert("บันทึกไม่สำเร็จ"); } };
+  if ($("#gshare")){
+    $("#gshare").onclick = async () => {
+      const b = $("#gshare"); b.disabled = true; b.textContent = "กำลังเข้ารหัส…";
+      try{ await shareGoogleKey($("#gpw").value); $("#gpw").value = ""; $("#gshst").textContent = "🟢 แชร์ key ให้กลุ่มอยู่"; alert("แชร์ key ให้กลุ่มแล้ว บอกรหัสผ่านผู้ร่วมทริปทางช่องทางอื่น (ไม่ใช่ในแชทเดียวกับลิงก์เชิญ)"); }
+      catch(x){ alert("แชร์ไม่สำเร็จ: " + (x.message || x)); }
+      b.disabled = false; b.textContent = "เข้ารหัสและแชร์ key";
+    };
+    $("#gunshare").onclick = async () => {
+      if (!confirm("ยกเลิกการแชร์ key? key จะถูกลบออกจากเครื่องผู้ร่วมทริปภายในไม่กี่วินาที")) return;
+      try{ await unshareGoogleKey(); $("#gshst").textContent = "ยังไม่ได้แชร์ key"; }catch(x){ alert("ไม่สำเร็จ"); }
+    };
+  }
   $("#gx").onclick = closeModal;
   m.onclick = e => { if (e.target === m) closeModal(); };
 }
@@ -1373,8 +1533,9 @@ const GMap = {
 
 async function initMap(){
   const el = $("#map"); el.innerHTML = "";
-  if (mapPref === "google" && gkey && !mapForceOsm){
-    try{ const g = Object.create(GMap); await g.init(el); MAP = g; return true; }
+  if (mapPref === "google" && gkey && !mapForceOsm && !googleAllowed()) mapNote = "ตอนนี้ Google ปิดอยู่หรือถึงเพดานการใช้ จึงใช้แผนที่ปกติแทน";
+  else if (mapPref === "google" && gkey && !mapForceOsm){
+    try{ const g = Object.create(GMap); await g.init(el); MAP = g; track("map"); return true; }
     catch(e){ mapNote = "Google Maps ใช้ไม่ได้ (" + e.message + ") จึงใช้แผนที่ปกติแทน"; el.innerHTML = ""; }
   }
   try{ const l = Object.create(LMap); await l.init(el); MAP = l; return true; }
