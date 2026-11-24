@@ -126,6 +126,7 @@ details summary{cursor:pointer;font-weight:600}
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
+const APP_VER = "2026-11-24-d (แก้ลิงก์เชิญ)";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -1061,7 +1062,8 @@ function inviteCode(){ return b64enc(JSON.stringify({ db: sync.db, id: sync.id }
 function inviteLink(){ return location.href.split("#")[0] + "#join=" + encodeURIComponent(inviteCode()); }
 function parseInvite(t){
   try{
-    const m = String(t).match(/join=([^&\s]+)/); let raw = m ? decodeURIComponent(m[1]) : String(t).trim();
+    const m = String(t).match(/join=([^&\s]+)/); let raw = m ? m[1] : String(t).trim();
+    try{ raw = decodeURIComponent(raw); }catch(e){}      // ลิงก์ที่ส่งผ่านแอปแชตมักมี %3D %2F ฯลฯ
     const o = JSON.parse(b64dec(raw));
     if (FB_RE.test(o.db || "") && /^[a-z0-9]{16,64}$/.test(o.id || "")) return { db:o.db, id:o.id };
   }catch(e){}
@@ -1223,7 +1225,8 @@ function openSettings(){
     <div class="cat">🧹 ข้อมูลที่จำไว้ในเครื่อง</div>
     <div class="row"><button class="b" id="gcache">ล้างแคชเส้นทาง/ปั๊ม/สถานที่แนะนำ</button>
       <button class="b" id="gall" style="color:var(--red)">🗑 ล้างกำหนดการและข้อมูลรถทั้งหมด</button></div>
-    <div class="row" style="margin-top:14px"><button class="b" id="gx">ปิด</button></div></div>`;
+    <div class="row" style="margin-top:14px"><button class="b" id="gx">ปิด</button></div>
+    <div class="meta" style="margin-top:10px;text-align:center">เวอร์ชันของไฟล์: ${APP_VER}</div></div>`;
   $("#thsel").value = theme; $("#thsel").onchange = e => setTheme(e.target.value);
   $("#mapsel").value = mapPref;
   $("#mapsel").onchange = e => {
@@ -1395,6 +1398,7 @@ renderTabs();
 load();
 importFromHash();
 initSync();
+window.addEventListener("hashchange", importFromHash);   // วางลิงก์เชิญในแท็บที่เปิดเว็บอยู่แล้ว หน้าไม่โหลดใหม่ ต้องจับการเปลี่ยน hash
 </script>
 </body>
 </html>
