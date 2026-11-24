@@ -97,6 +97,7 @@ details summary{cursor:pointer;font-weight:600}
   <div>
     <h1>🗺️ Family Trip Planner</h1>
     <div class="sub">เลือกจุดแวะ แล้วระบบจะคำนวณระยะทางและเวลาให้อัตโนมัติ</div>
+    <div class="sub" id="syncStat" style="color:var(--pri);font-weight:600"></div>
   </div>
   <div style="display:flex;gap:6px;flex:none">
     <button class="b" id="themeBtn" aria-label="สลับธีม" style="font-size:15px">☀️ สว่าง</button>
@@ -129,9 +130,13 @@ const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
 const esc = s => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;"); };
+const SYNC_KEYS = new Set(["trip.data.v1", "trip.sel.v1", "trip.stay.v1", "trip.dep.v1"]);
 const ls = {
   get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
-  set(k, v){ try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){} }
+  set(k, v){
+    try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){}
+    if (SYNC_KEYS.has(k) && globalThis.__syncHook) globalThis.__syncHook();   // ส่งการเปลี่ยนแปลงไปให้กลุ่ม (ถ้าเปิดซิงก์)
+  }
 };
 
 let trip = ls.get(LS.trip, DEFAULT_TRIP);
@@ -528,6 +533,7 @@ async function draw(day, picks, pts, seq){
       <button class="b" id="shFile">⬇️ ดาวน์โหลดไฟล์แผน</button>
       <button class="b" id="shImp">⬆️ นำเข้าแผน</button>
     </div>
+    <div class="row"><button class="b p" id="shSync" style="width:100%">👨‍👩‍👧 แก้ไขร่วมกันหลายคน (ทุกคนเห็นการแก้ไข) ${sync ? "🟢" : ""}</button></div>
   </div>
 
   <div class="card">
@@ -571,7 +577,7 @@ async function draw(day, picks, pts, seq){
   document.querySelectorAll("[data-vdel]").forEach(b => b.onclick = () => { if (confirm("ลบจุดหมายหลักนี้?")) dropVia(+b.dataset.vdel); });
   $("#recScope").onchange = e => { recScope = e.target.value; if (recStarted) runRec(recCat); showRec(); };
   $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
-  $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile;
+  $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile; $("#shSync").onclick = openSync;
   const myDraw = reqId;
   const ok = await mapP;
   if (myDraw !== reqId) return;
@@ -945,18 +951,20 @@ function cleanPlace(p){
   return { name: str(p.name, 100) || "ไม่ระบุชื่อ", lat, lng };
 }
 // ล้างข้อมูลที่รับมาจากภายนอก (ไฟล์/ลิงก์/JSON) ให้เป็นรูปแบบที่ปลอดภัย
+// Firebase เก็บ array ว่างเป็นค่าว่าง และบางครั้งคืนค่า array เป็น object → แปลงให้เป็น array เสมอ
+function arr(x){ return Array.isArray(x) ? x : (x && typeof x === "object" ? Object.values(x) : []); }
 function cleanTrip(t){
-  if (!t || !Array.isArray(t.days)) return null;
+  if (!t || typeof t !== "object" || t.days === undefined || t.days === null) return null;
   const days = [];
-  for (const d of t.days.slice(0, 60)){
+  for (const d of arr(t.days).slice(0, 60)){
     const s = cleanPlace(d && d.start), e = cleanPlace(d && d.end); if (!s || !e) return null;
     const stops = [];
-    for (const x of (Array.isArray(d.stops) ? d.stops : []).slice(0, 100)){
+    for (const x of arr(d.stops).slice(0, 100)){
       const p = cleanPlace(x); if (!p) return null;
       p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 200); stops.push(p);
     }
     const vias = [];
-    for (const x of (Array.isArray(d.vias) ? d.vias : []).slice(0, 20)){
+    for (const x of arr(d.vias).slice(0, 20)){
       const p = cleanPlace(x); if (!p) return null;
       p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 200); vias.push(p);
     }
@@ -1009,6 +1017,14 @@ async function shareLink(){
   catch(e){ prompt("คัดลอกลิงก์นี้:", url); }
 }
 function importFromHash(){
+  const j = location.hash.match(/^#join=(.+)$/);
+  if (j){
+    const inv = parseInvite(j[1]);
+    try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
+    if (!inv){ alert("ลิงก์เชิญไม่ถูกต้อง"); return; }
+    if (confirm("เข้าร่วมทริปที่แก้ไขร่วมกัน? ทุกคนในกลุ่มจะเห็นและแก้แผนเดียวกันได้")) joinSync(inv.db, inv.id);
+    return;
+  }
   const m = location.hash.match(/^#plan=(.+)$/); if (!m) return;
   try{
     const p = JSON.parse(b64dec(decodeURIComponent(m[1])));
@@ -1016,6 +1032,165 @@ function importFromHash(){
     if (confirm("มีแผนทริปที่ถูกแชร์มาให้ (" + t.days.length + " วัน) นำเข้าไหม?")) applyPlan(p, true);
   }catch(e){ alert("ลิงก์แผนทริปไม่ถูกต้อง"); }
   try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
+}
+
+/* ---------- แก้ไขร่วมกันหลายคน (ซิงก์ผ่าน Firebase Realtime Database) ---------- */
+const FB_RE = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.(firebaseio\.com|firebasedatabase\.app)$/;
+const FB_RULES = `{
+  "rules": {
+    "trips": {
+      "$tripId": {
+        ".read": true,
+        ".write": true,
+        ".validate": "newData.hasChildren(['rev','plan'])"
+      }
+    }
+  }
+}`;
+function randId(n){ const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a, x => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join(""); }
+let sync = ls.get("trip.sync.v1", null), lastRev = 0, syncApplying = false, pushTimer = null, syncErr = false, syncBusy = false;
+if (sync && !(FB_RE.test(sync.db || "") && /^[a-z0-9]{16,64}$/.test(sync.id || ""))) sync = null;
+let cid = ls.get("trip.cid.v1", ""); if (!cid){ cid = randId(10); ls.set("trip.cid.v1", cid); }
+const docUrl = () => `${sync.db}/trips/${sync.id}.json`;
+function normDb(u){ u = String(u || "").trim().replace(/\/+$/, ""); return FB_RE.test(u) ? u : null; }
+function setStat(){
+  const e = $("#syncStat"); if (!e) return;
+  e.textContent = sync ? (syncErr ? "⚠ แก้ไขร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)" : "🟢 แก้ไขร่วมกัน: เปิดอยู่") : "";
+}
+function inviteCode(){ return b64enc(JSON.stringify({ db: sync.db, id: sync.id })); }
+function inviteLink(){ return location.href.split("#")[0] + "#join=" + encodeURIComponent(inviteCode()); }
+function parseInvite(t){
+  try{
+    const m = String(t).match(/join=([^&\s]+)/); let raw = m ? decodeURIComponent(m[1]) : String(t).trim();
+    const o = JSON.parse(b64dec(raw));
+    if (FB_RE.test(o.db || "") && /^[a-z0-9]{16,64}$/.test(o.id || "")) return { db:o.db, id:o.id };
+  }catch(e){}
+  return null;
+}
+function schedulePush(){ if (!sync || syncApplying) return; clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 800); }
+async function pushNow(){
+  if (!sync) return;
+  const rev = Math.max(Date.now(), lastRev + 1);
+  try{
+    const r = await fetch(docUrl(), { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs } }) });
+    if (!r.ok) throw new Error(r.status);
+    lastRev = rev; syncErr = false;
+  }catch(e){ syncErr = true; setTimeout(schedulePush, 8000); }
+  setStat();
+}
+function busyUI(){
+  const a = document.activeElement;
+  return !$("#modal").hidden || !!pickMode || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest("#panel"));
+}
+function applyWhenIdle(doc, n = 0){
+  if (busyUI() && n < 20){ setTimeout(() => applyWhenIdle(doc, n + 1), 1500); return; }
+  applyRemote(doc);
+}
+function applyRemote(doc){
+  const p = (doc && doc.plan) || {};
+  const t = cleanTrip(p.trip && p.trip.days != null ? p.trip : Object.assign({}, p.trip, { days: [] })); if (!t) return;
+  trip = t; sel = cleanSel(p.sel); stays = cleanStays(p.stays); departs = cleanDeps(p.departs);
+  syncApplying = true;
+  try{ ls.set(LS.trip, trip); ls.set(LS.sel, sel); ls.set("trip.stay.v1", stays); ls.set("trip.dep.v1", departs); } finally { syncApplying = false; }
+  recMem = {}; cur = Math.max(0, Math.min(cur, trip.days.length - 1)); renderTabs(); load();
+}
+async function syncTick(){
+  if (!sync || document.hidden || syncBusy) return;
+  syncBusy = true;
+  try{
+    const rev = await fetchJSON(`${sync.db}/trips/${sync.id}/rev.json`, 8000);   // ดึงแค่ตัวเลขเวอร์ชัน (เล็กมาก)
+    if (typeof rev === "number" && rev > lastRev){
+      const doc = await fetchJSON(docUrl(), 10000);
+      if (doc && doc.rev > lastRev){ lastRev = doc.rev; if (doc.by !== cid) applyWhenIdle(doc); }
+    }
+    syncErr = false;
+  }catch(e){ syncErr = true; }
+  syncBusy = false; setStat();
+}
+async function startSync(dbRaw){
+  const db = normDb(dbRaw);
+  if (!db){ alert("ที่อยู่ฐานข้อมูลไม่ถูกต้อง ต้องขึ้นต้นด้วย https:// และลงท้ายด้วย firebasedatabase.app หรือ firebaseio.com"); return false; }
+  const id = randId(24), rev = Date.now();
+  try{
+    const r = await fetch(`${db}/trips/${id}.json`, { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs } }) });
+    if (!r.ok) throw new Error(r.status);
+  }catch(e){ alert("สร้างทริปร่วมไม่สำเร็จ ตรวจที่อยู่ฐานข้อมูลและ Rules (รหัสข้อผิดพลาด: " + (e.message || e) + ")"); return false; }
+  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setStat(); return true;
+}
+async function joinSync(db, id){
+  try{
+    const doc = await fetchJSON(`${db}/trips/${id}.json`, 10000);
+    if (!doc || !doc.plan){ alert("ไม่พบทริปนี้ (ลิงก์เชิญอาจผิด หรือถูกลบแล้ว)"); return false; }
+    if (trip.days.length && !confirm("เข้าร่วมทริปร่วม? แผนในเครื่องนี้จะถูกแทนที่ด้วยแผนของกลุ่ม")) return false;
+    sync = { db, id }; lastRev = doc.rev || 0; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db);
+    applyRemote(doc); setStat(); return true;
+  }catch(e){ alert("เข้าร่วมไม่สำเร็จ ตรวจอินเทอร์เน็ตและลิงก์เชิญ"); return false; }
+}
+function leaveSync(){ sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); setStat(); }
+async function copyText(t, okMsg){
+  try{ await navigator.clipboard.writeText(t); alert(okMsg); } catch(e){ prompt("คัดลอกข้อความนี้:", t); }
+}
+function openSync(){
+  const m = $("#modal"); m.hidden = false;
+  const hosted = location.protocol !== "file:";
+  if (sync){
+    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แก้ไขร่วมกัน</h2>
+      <p><b>${syncErr ? "⚠ ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่เอง)" : "🟢 เปิดอยู่"}</b></p>
+      <p class="meta">ทุกคนที่มีลิงก์เชิญ เพิ่ม/แก้/ลบแผนได้ และทุกเครื่องจะเห็นการเปลี่ยนแปลง (อัปเดตทุกประมาณ 5 วินาที)
+        ถ้าสองคนแก้พร้อมกัน ฉบับที่บันทึกทีหลังจะทับฉบับก่อน ควรแจ้งกันก่อนแก้ครั้งใหญ่</p>
+      <div class="row">
+        ${hosted ? `<button class="b p" id="syShare">🔗 ส่งลิงก์เชิญ</button>` : ""}
+        <button class="b ${hosted ? "" : "p"}" id="syCode">📋 คัดลอกรหัสเชิญ</button>
+      </div>
+      ${hosted ? "" : `<p class="meta">ตอนนี้เปิดจากไฟล์ในเครื่อง จึงสร้างลิงก์ไม่ได้ ส่ง "รหัสเชิญ" ให้ผู้ร่วมทริปไปวางในช่อง "เข้าร่วม" ได้</p>`}
+      <p class="meta">ผู้ที่มีลิงก์/รหัสแก้ไขหรือลบแผนได้ทุกอย่าง ส่งให้เฉพาะคนในครอบครัว</p>
+      <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ เลิกซิงก์ (เก็บแผนไว้ในเครื่อง)</button><button class="b" id="sx">ปิด</button></div></div>`;
+    if ($("#syShare")) $("#syShare").onclick = async () => {
+      const url = inviteLink();
+      try{ if (navigator.share){ await navigator.share({ title:"เข้าร่วมแก้ไขทริปด้วยกัน", url }); return; } }catch(e){ if (e && e.name === "AbortError") return; }
+      copyText(url, "คัดลอกลิงก์เชิญแล้ว ส่งให้ผู้ร่วมทริปได้เลย");
+    };
+    $("#syCode").onclick = () => copyText(inviteCode(), "คัดลอกรหัสเชิญแล้ว");
+    $("#syOff").onclick = () => { if (confirm("เลิกซิงก์? แผนที่เห็นตอนนี้จะอยู่ในเครื่องนี้ต่อ แต่จะไม่อัปเดตกับกลุ่มอีก")){ leaveSync(); closeModal(); } };
+  } else {
+    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แก้ไขร่วมกัน</h2>
+      <p class="meta">ให้ทุกคนในทริปเห็นและแก้แผนเดียวกัน ต้องมีฐานข้อมูลกลางฟรีของ Firebase (ตั้งครั้งเดียว ใช้เวลาประมาณ 5 นาที)</p>
+      <div class="cat" style="margin-top:6px">🅰 เริ่มทริปร่วมใหม่ (คนตั้งค่า)</div>
+      <input class="f" id="sdb" placeholder="ที่อยู่ Realtime Database เช่น https://ชื่อ-default-rtdb.asia-southeast1.firebasedatabase.app" value="${esc(ls.get("trip.db.v1", ""))}" autocomplete="off" style="margin-top:6px">
+      <div class="row"><button class="b p" id="sgo">สร้างทริปร่วมจากแผนนี้</button></div>
+      <details style="margin-top:8px"><summary>วิธีตั้ง Firebase (ทำครั้งเดียว)</summary>
+        <ol class="meta" style="padding-left:18px;margin:6px 0">
+          <li>เข้า console.firebase.google.com แล้วกด <b>Add project</b> (ปิด Google Analytics ได้)</li>
+          <li>เมนู <b>Build → Realtime Database</b> → <b>Create database</b> เลือกภูมิภาค Singapore → เริ่มแบบ <b>locked mode</b></li>
+          <li>แท็บ <b>Rules</b> วางข้อความด้านล่างทับทั้งหมด แล้วกด <b>Publish</b></li>
+          <li>แท็บ <b>Data</b> คัดลอกที่อยู่ที่ขึ้นต้นด้วย https:// (อยู่บนสุด) มาวางในช่องด้านบน</li>
+        </ol>
+        <textarea readonly id="srules" style="height:170px">${esc(FB_RULES)}</textarea>
+        <div class="row"><button class="b" id="srcopy">คัดลอก Rules</button></div>
+      </details>
+      <div class="cat">🅱 เข้าร่วมทริปที่มีคนเชิญ</div>
+      <input class="f" id="sinv" placeholder="วางลิงก์เชิญ หรือรหัสเชิญ" autocomplete="off" style="margin-top:6px">
+      <div class="row"><button class="b p" id="sjoin">เข้าร่วม</button><button class="b" id="sx">ปิด</button></div></div>`;
+    $("#srcopy").onclick = () => copyText(FB_RULES, "คัดลอก Rules แล้ว");
+    $("#sgo").onclick = async () => {
+      if (!trip.days.length && !confirm("ตอนนี้ยังไม่มีแผน สร้างทริปร่วมเปล่าเลยไหม?")) return;
+      const b = $("#sgo"); b.disabled = true; b.textContent = "กำลังสร้าง…";
+      if (await startSync($("#sdb").value)){ openSync(); } else { b.disabled = false; b.textContent = "สร้างทริปร่วมจากแผนนี้"; }
+    };
+    $("#sjoin").onclick = async () => {
+      const inv = parseInvite($("#sinv").value); if (!inv){ alert("ลิงก์หรือรหัสเชิญไม่ถูกต้อง"); return; }
+      if (await joinSync(inv.db, inv.id)) closeModal();
+    };
+  }
+  $("#sx").onclick = closeModal;
+  m.onclick = e => { if (e.target === m) closeModal(); };
+}
+function initSync(){
+  globalThis.__syncHook = schedulePush;
+  setStat();
+  setInterval(syncTick, 5000);
+  document.addEventListener("visibilitychange", () => { if (!document.hidden) syncTick(); });
+  syncTick();
 }
 
 /* ---------- เมนูตั้งค่า ---------- */
@@ -1219,6 +1394,7 @@ mapP = initMap();
 renderTabs();
 load();
 importFromHash();
+initSync();
 </script>
 </body>
 </html>
