@@ -929,7 +929,7 @@ function showRec(){
   // รูปประกอบ
   if (slot && slot.items) box.querySelectorAll(".ph").forEach(el => {
     const p = slot.items[+el.dataset.i]; if (!p) return;
-    const put = u => { if (!u || !el.isConnected) return; const im = new Image(); im.alt = ""; im.referrerPolicy = "no-referrer";
+    const put = u => { if (!u || !el.isConnected) return; const im = new Image(); im.alt = ""; im.referrerPolicy = /googleapis\.com/.test(u) ? "origin" : "no-referrer";  // รูปจาก Google ต้องส่ง referrer เพื่อให้ผ่านการจำกัดเว็บของ key
       im.onload = () => el.appendChild(im); im.src = u; };
     if (p.photo !== undefined && p.photo !== null && p.photo !== "") put(p.photo);
     else if (p.photo === undefined || p.photo === null){ osmPhoto(p).then(u => { p.photo = u || ""; put(u); }); }
