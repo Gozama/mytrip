@@ -119,6 +119,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
   <div id="panel"></div>
 </main>
 
+<footer style="text-align:center;color:var(--mute);font-size:12px;padding:0 16px 28px">เวอร์ชัน <span id="ver"></span></footer>
 <div id="modal" hidden></div>
 <div id="toast" hidden></div>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -135,7 +136,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-24-e (แชร์ร่วมกัน)";
+const APP_VER = "2026-11-24-f";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -1249,7 +1250,7 @@ function openSettings(){
     <div class="row"><button class="b" id="gcache">ล้างแคชเส้นทาง/ปั๊ม/สถานที่แนะนำ</button>
       <button class="b" id="gall" style="color:var(--red)">🗑 ล้างกำหนดการและข้อมูลรถทั้งหมด</button></div>
     <div class="row" style="margin-top:14px"><button class="b" id="gx">ปิด</button></div>
-    <div class="meta" style="margin-top:10px;text-align:center">เวอร์ชันของไฟล์: ${APP_VER}</div></div>`;
+</div>`;
   $("#thsel").value = theme; $("#thsel").onchange = e => setTheme(e.target.value);
   $("#mapsel").value = mapPref;
   $("#mapsel").onchange = e => {
@@ -1283,14 +1284,16 @@ const LMap = {
     this.objs = [];
     const m = this.m = L.map(el);
     m.on("click", e => onMapClick({ lat:e.latlng.lat, lng:e.latlng.lng }));
-    // ไม่ใช้ tile.openstreetmap.org เพราะบล็อกไฟล์ที่เปิดจาก file:// (ไม่มี Referer)
-    const carto = L.tileLayer("https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}{r}.png",
-      { maxZoom:19, subdomains:"abcd", attribution:"© OpenStreetMap © CARTO" }).addTo(m);
-    const esri = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
-      { maxZoom:19, attribution:"Tiles © Esri" });
+    // CARTO ตอนนี้ต้องใช้ API key (แผนที่ขึ้นลายน้ำ "API KEY REQUIRED") จึงเลิกใช้
+    // OpenStreetMap ใช้ได้เมื่อเปิดจากเว็บ (https) แต่บล็อกไฟล์ที่เปิดจาก file:// (ไม่มี Referer) → กรณีนั้นใช้ Esri แทน
+    const hosted = /^https?:$/.test(location.protocol);
+    const osm = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", { maxZoom:19, attribution:"© OpenStreetMap contributors" });
+    const esri = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}", { maxZoom:19, attribution:"Tiles © Esri" });
+    const sat = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}", { maxZoom:19, attribution:"Tiles © Esri" });
+    (hosted ? osm : esri).addTo(m);
     let failed = 0;
-    carto.on("tileerror", () => { if (++failed === 3){ m.removeLayer(carto); esri.addTo(m); } });
-    L.control.layers({ "แผนที่ปกติ": carto, "แผนที่ Esri": esri }, null, { position:"topright" }).addTo(m);
+    osm.on("tileerror", () => { if (hosted && ++failed === 4 && m.hasLayer(osm)){ m.removeLayer(osm); esri.addTo(m); } });
+    L.control.layers({ "แผนที่ถนน (OpenStreetMap)": osm, "แผนที่ถนน (Esri)": esri, "ดาวเทียม (Esri)": sat }, null, { position:"topright" }).addTo(m);
     m.setView([13, 101], 6);
     try{ new ResizeObserver(() => m.invalidateSize()).observe(el); }catch(e){}   // ขนาดกรอบแผนที่เปลี่ยนภายหลัง (มือถือหมุนจอ/แถบเบราว์เซอร์) แผนที่จะไม่ขาว
   },
@@ -1435,6 +1438,7 @@ $("#panel").addEventListener("click", e => {
   const h = e.target.closest(".card>h2:first-child"); if (!h) return;
   const k = foldKey(h); folds[k] = !folds[k]; ls.set("trip.fold.v1", folds); h.parentElement.classList.toggle("collapsed", !!folds[k]);
 });
+$("#ver").textContent = APP_VER;
 applyPanel(); applyRoleUI();
 mapP = initMap();
 renderTabs();
