@@ -70,6 +70,14 @@ details summary{cursor:pointer;font-weight:600}
 .sch{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:14px}
 .cat{font-weight:700;margin:14px 0 2px}
 .tab.add{border-style:dashed;color:var(--pri)}
+.card>h2:first-child{cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center}
+.card>h2:first-child::after{content:"▾";font-size:14px;opacity:.85}
+.card.collapsed>h2:first-child{margin-bottom:-14px;border-radius:13px}
+.card.collapsed>h2:first-child::after{content:"▸"}
+.card.collapsed>*:not(h2:first-child){display:none}
+body.nopanel #panel{display:none}
+body.nopanel main{grid-template-columns:1fr}
+body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position:static}
 :root{--onpri:#fff}
 :root[data-theme=dark]{--onpri:#062a27}
 @media (prefers-color-scheme:dark){:root[data-theme=auto]{--onpri:#062a27}}
@@ -100,6 +108,7 @@ details summary{cursor:pointer;font-weight:600}
     <div class="sub" id="syncStat" style="color:var(--pri);font-weight:600"></div>
   </div>
   <div style="display:flex;gap:6px;flex:none">
+    <button class="b" id="panelBtn" aria-label="ซ่อน/แสดงแผงด้านขวา" style="font-size:15px">📋 ซ่อนแผง</button>
     <button class="b" id="themeBtn" aria-label="สลับธีม" style="font-size:15px">☀️ สว่าง</button>
     <button class="b" id="setBtn" aria-label="ตั้งค่า" style="font-size:15px">⚙️</button>
   </div>
@@ -126,12 +135,12 @@ details summary{cursor:pointer;font-weight:600}
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-24-d (แก้ลิงก์เชิญ)";
+const APP_VER = "2026-11-24-e (แชร์ร่วมกัน)";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
 const esc = s => { const d = document.createElement("div"); d.textContent = s ?? ""; return d.innerHTML.replace(/"/g, "&quot;").replace(/'/g, "&#39;"); };
-const SYNC_KEYS = new Set(["trip.data.v1", "trip.sel.v1", "trip.stay.v1", "trip.dep.v1"]);
+const SYNC_KEYS = new Set(["trip.data.v1", "trip.sel.v1", "trip.stay.v1", "trip.dep.v1", "trip.veh.v1"]);
 const ls = {
   get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
   set(k, v){
@@ -398,6 +407,7 @@ async function update(){
 
 async function draw(day, picks, pts, seq){
   curPts = pts;
+  const guest = isGuest();
   const T = tableData, direct = T.base, vias = day.vias || [];
   const mains = [day.start, ...vias, day.end];
   const est = routeData.est || T.est;
@@ -523,21 +533,23 @@ async function draw(day, picks, pts, seq){
         ${vias.map((v, j) => `<option value="via${j}">ใกล้ ${esc(v.name)}</option>`).join("")}</select></label>
     <div id="recBox" style="margin-top:10px"></div>
     <div class="meta" style="margin-top:10px">${gkey ? "🔑 ใช้คะแนนรีวิวจาก Google (ตั้ง key แล้ว)" : "ตอนนี้ใช้ข้อมูลฟรีจาก OpenStreetMap (ไม่มีคะแนนรีวิว)"}
-      · <a href="#" id="recSet">ตั้งค่า API key</a></div>
+      ${guest ? "" : `· <a href="#" id="recSet">ตั้งค่า API key</a>`}</div>
   </div>
 
   <div class="card">
-    <h2>📤 แชร์และสำรองแผนทริป</h2>
+    <h2>${guest ? "👨‍👩‍👧 แชร์ร่วมกัน" : "📤 แชร์และสำรองแผนทริป"}</h2>
+    ${guest ? `<p class="meta" style="margin:0 0 4px">ทุกคนในทริปเห็นและแก้แผนเดียวกัน ส่งลิงก์เชิญให้คนอื่นได้ที่ปุ่มด้านล่าง</p>` : `
     <p class="meta" style="margin:0 0 4px">ส่งแผนนี้ให้คนอื่น หรือเก็บสำรองไว้ได้ ผู้รับกด "นำเข้าแผน" เพื่อเปิดแผนเดียวกัน (ไม่รวม API key)</p>
     <div class="row">
       <button class="b p" id="shLink">🔗 ส่งต่อ / คัดลอกลิงก์</button>
       <button class="b" id="shFile">⬇️ ดาวน์โหลดไฟล์แผน</button>
       <button class="b" id="shImp">⬆️ นำเข้าแผน</button>
     </div>
-    <div class="row"><button class="b p" id="shSync" style="width:100%">👨‍👩‍👧 แก้ไขร่วมกันหลายคน (ทุกคนเห็นการแก้ไข) ${sync ? "🟢" : ""}</button></div>
+`}
+    <div class="row"><button class="b p" id="shSync" style="width:100%">👨‍👩‍👧 แชร์ร่วมกัน ${sync ? "🟢" : ""}</button></div>
   </div>
 
-  <div class="card">
+  ${guest ? "" : `<div class="card">
     <h2>✏️ แก้ไขข้อมูลทริป (ขั้นสูง)</h2>
     <details><summary>เปิดตัวแก้ไข JSON</summary>
       <p class="meta">แก้ชื่อ / พิกัด / เวลาแวะ / เพิ่มวัน เพิ่มจุดแวะ ได้ในรูปแบบ JSON แล้วกด "ใช้ข้อมูลนี้"</p>
@@ -548,15 +560,15 @@ async function draw(day, picks, pts, seq){
         <button class="b" id="clr">ล้างตัวเลือกวันนี้</button>
       </div>
     </details>
-  </div>`;
+  </div>`}`;
 
   // events
   document.querySelectorAll(".stop").forEach(el => el.onclick = e => toggle(+el.dataset.i));
   document.querySelectorAll("[data-stay]").forEach(inp => inp.onchange = () => { stays[cur+"_"+inp.dataset.stay] = +inp.value; ls.set("trip.stay.v1", stays); update(); });
   $("#dep").onchange = e => { departs[cur] = e.target.value; ls.set("trip.dep.v1", departs); update(); };
-  $("#clr").onclick = () => { sel[cur] = {}; ls.set(LS.sel, sel); update(); };
-  $("#reset").onclick = () => { if (confirm("ล้างกำหนดการและข้อมูลรถทั้งหมด แล้วเริ่มใหม่?")) resetAll(); };
-  $("#apply").onclick = () => {
+  if ($("#clr")) $("#clr").onclick = () => { sel[cur] = {}; ls.set(LS.sel, sel); update(); };
+  if ($("#reset")) $("#reset").onclick = () => { if (confirm("ล้างกำหนดการและข้อมูลรถทั้งหมด แล้วเริ่มใหม่?")) resetAll(); };
+  if ($("#apply")) $("#apply").onclick = () => {
     try{ const t = cleanTrip(JSON.parse($("#json").value)); if (!t) throw "bad";
       trip = t; ls.set(LS.trip, trip); cur = Math.max(0, Math.min(cur, t.days.length-1)); renderTabs(); load();
     }catch(e){ alert("รูปแบบ JSON ไม่ถูกต้อง (แต่ละวันต้องมี start/end ที่มี name, lat, lng)"); }
@@ -577,8 +589,10 @@ async function draw(day, picks, pts, seq){
   document.querySelectorAll("[data-vmv]").forEach(b => b.onclick = () => { const [j, d] = b.dataset.vmv.split(":").map(Number); moveVia(j, d); });
   document.querySelectorAll("[data-vdel]").forEach(b => b.onclick = () => { if (confirm("ลบจุดหมายหลักนี้?")) dropVia(+b.dataset.vdel); });
   $("#recScope").onchange = e => { recScope = e.target.value; if (recStarted) runRec(recCat); showRec(); };
-  $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
-  $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile; $("#shSync").onclick = openSync;
+  if ($("#recSet")) $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
+  if ($("#shLink")){ $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile; }
+  $("#shSync").onclick = openSync;
+  applyFolds();
   const myDraw = reqId;
   const ok = await mapP;
   if (myDraw !== reqId) return;
@@ -1023,7 +1037,7 @@ function importFromHash(){
     const inv = parseInvite(j[1]);
     try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
     if (!inv){ alert("ลิงก์เชิญไม่ถูกต้อง"); return; }
-    if (confirm("เข้าร่วมทริปที่แก้ไขร่วมกัน? ทุกคนในกลุ่มจะเห็นและแก้แผนเดียวกันได้")) joinSync(inv.db, inv.id);
+    if (confirm("เข้าร่วมทริปที่แชร์ร่วมกัน? ทุกคนในกลุ่มจะเห็นและแก้แผนเดียวกันได้")) joinSync(inv.db, inv.id);
     return;
   }
   const m = location.hash.match(/^#plan=(.+)$/); if (!m) return;
@@ -1035,7 +1049,7 @@ function importFromHash(){
   try{ history.replaceState(null, "", location.pathname + location.search); }catch(e){}
 }
 
-/* ---------- แก้ไขร่วมกันหลายคน (ซิงก์ผ่าน Firebase Realtime Database) ---------- */
+/* ---------- แชร์ร่วมกันหลายคน (ซิงก์ผ่าน Firebase Realtime Database) ---------- */
 const FB_RE = /^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.(firebaseio\.com|firebasedatabase\.app)$/;
 const FB_RULES = `{
   "rules": {
@@ -1051,12 +1065,19 @@ const FB_RULES = `{
 function randId(n){ const a = new Uint8Array(n); crypto.getRandomValues(a); return Array.from(a, x => "abcdefghijkmnpqrstuvwxyz23456789"[x % 32]).join(""); }
 let sync = ls.get("trip.sync.v1", null), lastRev = 0, syncApplying = false, pushTimer = null, syncErr = false, syncBusy = false;
 if (sync && !(FB_RE.test(sync.db || "") && /^[a-z0-9]{16,64}$/.test(sync.id || ""))) sync = null;
+// ผู้ที่เข้าร่วมผ่านลิงก์เชิญเป็น "ผู้ร่วมทริป" (guest): ซ่อนตั้งค่า แชร์/สำรองแผน และตัวแก้ไข JSON ขั้นสูง
+// หมายเหตุ: เป็นการซ่อนปุ่มในหน้าจอเท่านั้น ไม่ใช่ระบบความปลอดภัย
+let role = ls.get("trip.role.v1", "owner");
+if (!sync && role === "guest") role = "owner";
+const isGuest = () => role === "guest";
+function applyRoleUI(){ const b = $("#setBtn"); if (b) b.hidden = isGuest(); }
+function setRole(r){ role = r; ls.set("trip.role.v1", r); applyRoleUI(); }
 let cid = ls.get("trip.cid.v1", ""); if (!cid){ cid = randId(10); ls.set("trip.cid.v1", cid); }
 const docUrl = () => `${sync.db}/trips/${sync.id}.json`;
 function normDb(u){ u = String(u || "").trim().replace(/\/+$/, ""); return FB_RE.test(u) ? u : null; }
 function setStat(){
   const e = $("#syncStat"); if (!e) return;
-  e.textContent = sync ? (syncErr ? "⚠ แก้ไขร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)" : "🟢 แก้ไขร่วมกัน: เปิดอยู่") : "";
+  e.textContent = sync ? (syncErr ? "⚠ แชร์ร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)" : "🟢 แชร์ร่วมกัน: เปิดอยู่") : "";
 }
 function inviteCode(){ return b64enc(JSON.stringify({ db: sync.db, id: sync.id })); }
 function inviteLink(){ return location.href.split("#")[0] + "#join=" + encodeURIComponent(inviteCode()); }
@@ -1074,7 +1095,7 @@ async function pushNow(){
   if (!sync) return;
   const rev = Math.max(Date.now(), lastRev + 1);
   try{
-    const r = await fetch(docUrl(), { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs } }) });
+    const r = await fetch(docUrl(), { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
     if (!r.ok) throw new Error(r.status);
     lastRev = rev; syncErr = false;
   }catch(e){ syncErr = true; setTimeout(schedulePush, 8000); }
@@ -1092,8 +1113,9 @@ function applyRemote(doc){
   const p = (doc && doc.plan) || {};
   const t = cleanTrip(p.trip && p.trip.days != null ? p.trip : Object.assign({}, p.trip, { days: [] })); if (!t) return;
   trip = t; sel = cleanSel(p.sel); stays = cleanStays(p.stays); departs = cleanDeps(p.departs);
+  const v = cleanVeh(p.veh); if (v) veh = v;      // ข้อมูลรถเป็นของทั้งกลุ่ม ให้ตรงกันทุกเครื่อง
   syncApplying = true;
-  try{ ls.set(LS.trip, trip); ls.set(LS.sel, sel); ls.set("trip.stay.v1", stays); ls.set("trip.dep.v1", departs); } finally { syncApplying = false; }
+  try{ ls.set(LS.trip, trip); ls.set(LS.sel, sel); ls.set("trip.stay.v1", stays); ls.set("trip.dep.v1", departs); if (v) ls.set("trip.veh.v1", veh); } finally { syncApplying = false; }
   recMem = {}; cur = Math.max(0, Math.min(cur, trip.days.length - 1)); renderTabs(); load();
 }
 async function syncTick(){
@@ -1114,10 +1136,10 @@ async function startSync(dbRaw){
   if (!db){ alert("ที่อยู่ฐานข้อมูลไม่ถูกต้อง ต้องขึ้นต้นด้วย https:// และลงท้ายด้วย firebasedatabase.app หรือ firebaseio.com"); return false; }
   const id = randId(24), rev = Date.now();
   try{
-    const r = await fetch(`${db}/trips/${id}.json`, { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs } }) });
+    const r = await fetch(`${db}/trips/${id}.json`, { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
     if (!r.ok) throw new Error(r.status);
   }catch(e){ alert("สร้างทริปร่วมไม่สำเร็จ ตรวจที่อยู่ฐานข้อมูลและ Rules (รหัสข้อผิดพลาด: " + (e.message || e) + ")"); return false; }
-  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setStat(); return true;
+  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setRole("owner"); setStat(); return true;
 }
 async function joinSync(db, id){
   try{
@@ -1125,10 +1147,10 @@ async function joinSync(db, id){
     if (!doc || !doc.plan){ alert("ไม่พบทริปนี้ (ลิงก์เชิญอาจผิด หรือถูกลบแล้ว)"); return false; }
     if (trip.days.length && !confirm("เข้าร่วมทริปร่วม? แผนในเครื่องนี้จะถูกแทนที่ด้วยแผนของกลุ่ม")) return false;
     sync = { db, id }; lastRev = doc.rev || 0; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db);
-    applyRemote(doc); setStat(); return true;
+    setRole("guest"); applyRemote(doc); setStat(); return true;
   }catch(e){ alert("เข้าร่วมไม่สำเร็จ ตรวจอินเทอร์เน็ตและลิงก์เชิญ"); return false; }
 }
-function leaveSync(){ sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); setStat(); }
+function leaveSync(){ sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); setRole("owner"); setStat(); if (trip.days.length) update(); }
 async function copyText(t, okMsg){
   try{ await navigator.clipboard.writeText(t); alert(okMsg); } catch(e){ prompt("คัดลอกข้อความนี้:", t); }
 }
@@ -1136,7 +1158,7 @@ function openSync(){
   const m = $("#modal"); m.hidden = false;
   const hosted = location.protocol !== "file:";
   if (sync){
-    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แก้ไขร่วมกัน</h2>
+    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แชร์ร่วมกัน</h2>
       <p><b>${syncErr ? "⚠ ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่เอง)" : "🟢 เปิดอยู่"}</b></p>
       <p class="meta">ทุกคนที่มีลิงก์เชิญ เพิ่ม/แก้/ลบแผนได้ และทุกเครื่องจะเห็นการเปลี่ยนแปลง (อัปเดตทุกประมาณ 5 วินาที)
         ถ้าสองคนแก้พร้อมกัน ฉบับที่บันทึกทีหลังจะทับฉบับก่อน ควรแจ้งกันก่อนแก้ครั้งใหญ่</p>
@@ -1146,7 +1168,7 @@ function openSync(){
       </div>
       ${hosted ? "" : `<p class="meta">ตอนนี้เปิดจากไฟล์ในเครื่อง จึงสร้างลิงก์ไม่ได้ ส่ง "รหัสเชิญ" ให้ผู้ร่วมทริปไปวางในช่อง "เข้าร่วม" ได้</p>`}
       <p class="meta">ผู้ที่มีลิงก์/รหัสแก้ไขหรือลบแผนได้ทุกอย่าง ส่งให้เฉพาะคนในครอบครัว</p>
-      <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ เลิกซิงก์ (เก็บแผนไว้ในเครื่อง)</button><button class="b" id="sx">ปิด</button></div></div>`;
+      <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ ${isGuest() ? "ออกจากทริปร่วม" : "เลิกซิงก์"} (เก็บแผนไว้ในเครื่อง)</button><button class="b" id="sx">ปิด</button></div></div>`;
     if ($("#syShare")) $("#syShare").onclick = async () => {
       const url = inviteLink();
       try{ if (navigator.share){ await navigator.share({ title:"เข้าร่วมแก้ไขทริปด้วยกัน", url }); return; } }catch(e){ if (e && e.name === "AbortError") return; }
@@ -1155,7 +1177,7 @@ function openSync(){
     $("#syCode").onclick = () => copyText(inviteCode(), "คัดลอกรหัสเชิญแล้ว");
     $("#syOff").onclick = () => { if (confirm("เลิกซิงก์? แผนที่เห็นตอนนี้จะอยู่ในเครื่องนี้ต่อ แต่จะไม่อัปเดตกับกลุ่มอีก")){ leaveSync(); closeModal(); } };
   } else {
-    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แก้ไขร่วมกัน</h2>
+    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แชร์ร่วมกัน</h2>
       <p class="meta">ให้ทุกคนในทริปเห็นและแก้แผนเดียวกัน ต้องมีฐานข้อมูลกลางฟรีของ Firebase (ตั้งครั้งเดียว ใช้เวลาประมาณ 5 นาที)</p>
       <div class="cat" style="margin-top:6px">🅰 เริ่มทริปร่วมใหม่ (คนตั้งค่า)</div>
       <input class="f" id="sdb" placeholder="ที่อยู่ Realtime Database เช่น https://ชื่อ-default-rtdb.asia-southeast1.firebasedatabase.app" value="${esc(ls.get("trip.db.v1", ""))}" autocomplete="off" style="margin-top:6px">
@@ -1197,6 +1219,7 @@ function initSync(){
 
 /* ---------- เมนูตั้งค่า ---------- */
 function openSettings(){
+  if (isGuest()) return;
   const m = $("#modal"); m.hidden = false;
   const mask = k => k ? "ตั้งค่าแล้ว (••••" + k.slice(-4) + ")" : "ยังไม่ได้ตั้งค่า";
   m.innerHTML = `<div class="mbox"><h2>⚙️ ตั้งค่า</h2>
@@ -1269,7 +1292,9 @@ const LMap = {
     carto.on("tileerror", () => { if (++failed === 3){ m.removeLayer(carto); esri.addTo(m); } });
     L.control.layers({ "แผนที่ปกติ": carto, "แผนที่ Esri": esri }, null, { position:"topright" }).addTo(m);
     m.setView([13, 101], 6);
+    try{ new ResizeObserver(() => m.invalidateSize()).observe(el); }catch(e){}   // ขนาดกรอบแผนที่เปลี่ยนภายหลัง (มือถือหมุนจอ/แถบเบราว์เซอร์) แผนที่จะไม่ขาว
   },
+  resize(){ try{ this.m.invalidateSize(); }catch(e){} },
   marker(o){
     const mk = L.marker([o.lat, o.lng], { icon: L.divIcon({ className:"", iconSize:[28,28], iconAnchor:[14,14], html: pinHtml(o.label, o.color) }), zIndexOffset: o.z || 0 }).addTo(this.m);
     if (o.popup) mk.bindPopup(o.popup);
@@ -1321,6 +1346,7 @@ const GMap = {
     this.m.addListener("click", e => onMapClick({ lat:e.latLng.lat(), lng:e.latLng.lng() }));
   },
   scheme(){ return theme === "dark" ? "DARK" : theme === "auto" ? "FOLLOW_SYSTEM" : "LIGHT"; },
+  resize(){ try{ google.maps.event.trigger(this.m, "resize"); }catch(e){} },
   setTheme(){ try{ this.m.setOptions({ colorScheme: this.scheme() }); }catch(e){} },
   marker(o){
     const c = document.createElement("div"); c.innerHTML = pinHtml(o.label, o.color);
@@ -1393,6 +1419,23 @@ function setTheme(t){
 $("#themeBtn").onclick = () => setTheme({ light:"dark", dark:"auto", auto:"light" }[theme]);
 setTheme(theme);
 $("#setBtn").onclick = openSettings;
+// ซ่อน/แสดงแผงด้านขวา (ให้แผนที่เต็มหน้าจอ)
+let panelHidden = ls.get("trip.panelhidden.v1", false);
+function applyPanel(){
+  document.body.classList.toggle("nopanel", !!panelHidden);
+  const b = $("#panelBtn"); if (b) b.textContent = panelHidden ? "📋 แสดงแผง" : "📋 ซ่อนแผง";
+  setTimeout(() => { if (MAP && MAP.resize) MAP.resize(); }, 80);
+}
+$("#panelBtn").onclick = () => { panelHidden = !panelHidden; ls.set("trip.panelhidden.v1", panelHidden); applyPanel(); };
+// พับ/ขยายแต่ละส่วน โดยกดที่แถบหัวข้อ (จำสถานะไว้)
+let folds = ls.get("trip.fold.v1", {});
+const foldKey = h => h.textContent.replace(/\d+/g, "#").trim();
+function applyFolds(){ document.querySelectorAll("#panel .card>h2:first-child").forEach(h => h.parentElement.classList.toggle("collapsed", !!folds[foldKey(h)])); }
+$("#panel").addEventListener("click", e => {
+  const h = e.target.closest(".card>h2:first-child"); if (!h) return;
+  const k = foldKey(h); folds[k] = !folds[k]; ls.set("trip.fold.v1", folds); h.parentElement.classList.toggle("collapsed", !!folds[k]);
+});
+applyPanel(); applyRoleUI();
 mapP = initMap();
 renderTabs();
 load();
