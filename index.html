@@ -136,7 +136,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-25-k";
+const APP_VER = "2026-11-25-l";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -1239,9 +1239,7 @@ async function shareLink(){
     exportFile(); return;
   }
   const url = location.href.split("#")[0] + "#plan=" + encodeURIComponent(b64enc(JSON.stringify(planObj(false))));
-  try{ if (navigator.share){ await navigator.share({ title:"แผนทริป", url }); return; } }catch(e){ if (e && e.name === "AbortError") return; }
-  try{ await navigator.clipboard.writeText(url); alert("คัดลอกลิงก์แล้ว นำไปวางส่งให้คนอื่นได้เลย"); }
-  catch(e){ prompt("คัดลอกลิงก์นี้:", url); }
+  openLinkBox("ลิงก์ภาพของแผนทริป", url, "นี่คือภาพของแผน ณ ตอนนี้ (ไม่รวมข้อมูลรถ และไม่ซิงก์กับเครื่องนี้) ถ้าอยากให้เห็นการแก้ไขตรงกัน ให้ใช้ปุ่ม \"แชร์ร่วมกัน\" แล้วส่งลิงก์เชิญแทน");
 }
 function importFromHash(){
   const j = location.hash.match(/^#join=(.+)$/);
@@ -1394,8 +1392,41 @@ function leaveSync(){
   if (gsrc === "group") dropGroupKey();           // key ที่ได้มาจากกลุ่ม ต้องออกจากเครื่องเมื่อออกจากกลุ่ม
   setRole("owner"); setStat(); if (trip.days.length) update();
 }
+// คัดลอกลงคลิปบอร์ด: ลองวิธีมาตรฐานก่อน แล้วสำรองด้วยวิธีเก่า (ใช้ได้ในเบราว์เซอร์/สภาพแวดล้อมที่คลิปบอร์ดสมัยใหม่ใช้ไม่ได้)
+async function copyToClipboard(t){
+  try{ if (navigator.clipboard && window.isSecureContext){ await navigator.clipboard.writeText(t); return true; } }catch(e){}
+  try{
+    const ta = document.createElement("textarea"); ta.value = t; ta.setAttribute("readonly", "");
+    ta.style.cssText = "position:fixed;top:0;left:0;opacity:0"; document.body.appendChild(ta);
+    ta.focus(); ta.select(); ta.setSelectionRange(0, t.length);
+    const ok = document.execCommand("copy"); ta.remove(); return ok;
+  }catch(e){ return false; }
+}
+function flash(msg){
+  const t = $("#toast"); if (!t || pickMode) return;
+  t.hidden = false; t.textContent = msg; clearTimeout(flash.tm); flash.tm = setTimeout(() => { if (!pickMode) t.hidden = true; }, 2400);
+}
+// หน้าต่างแสดงลิงก์/รหัส: เลือกข้อความให้แล้ว มีปุ่มคัดลอกและส่งผ่านแอป (ถ้าคัดลอกอัตโนมัติไม่ได้ ก็คัดลอกเองได้จากช่องนี้)
+function openLinkBox(title, text, hint){
+  const m = $("#modal"); m.hidden = false;
+  m.innerHTML = `<div class="mbox"><h2>${esc(title)}</h2>${hint ? `<p class="meta">${esc(hint)}</p>` : ""}
+    <textarea id="lkbox" readonly style="height:120px">${esc(text)}</textarea>
+    <div class="row"><button class="b p" id="lkcopy">📋 คัดลอก</button>${navigator.share ? `<button class="b" id="lkshare">📤 ส่งผ่านแอป</button>` : ""}<button class="b" id="lkx">ปิด</button></div>
+    <div class="meta" id="lkmsg" style="margin-top:6px"></div></div>`;
+  const ta = $("#lkbox"); ta.focus(); ta.select();
+  $("#lkcopy").onclick = async () => {
+    const ok = await copyToClipboard(text);
+    $("#lkmsg").textContent = ok ? "✓ คัดลอกแล้ว ไปวางได้เลย" : "คัดลอกอัตโนมัติไม่ได้ ข้อความถูกเลือกไว้แล้ว กด Ctrl+C (บนมือถือกดค้างแล้วเลือก คัดลอก)";
+    if (ok) $("#lkcopy").textContent = "✓ คัดลอกแล้ว";
+    ta.focus(); ta.select();
+  };
+  if ($("#lkshare")) $("#lkshare").onclick = async () => {
+    try{ await navigator.share(/^https?:/.test(text) ? { title:"แผนทริป", url:text } : { text }); }catch(e){}
+  };
+  $("#lkx").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
+}
 async function copyText(t, okMsg){
-  try{ await navigator.clipboard.writeText(t); alert(okMsg); } catch(e){ prompt("คัดลอกข้อความนี้:", t); }
+  if (await copyToClipboard(t)) flash(okMsg || "คัดลอกแล้ว"); else openLinkBox("คัดลอกข้อความนี้ด้วยตัวเอง", t);
 }
 function openSync(){
   const m = $("#modal"); m.hidden = false;
@@ -1406,18 +1437,14 @@ function openSync(){
       <p class="meta">ทุกคนที่มีลิงก์เชิญ เพิ่ม/แก้/ลบแผนได้ และทุกเครื่องจะเห็นการเปลี่ยนแปลง (อัปเดตทุกประมาณ 5 วินาที)
         ถ้าสองคนแก้พร้อมกัน ฉบับที่บันทึกทีหลังจะทับฉบับก่อน ควรแจ้งกันก่อนแก้ครั้งใหญ่</p>
       <div class="row">
-        ${hosted ? `<button class="b p" id="syShare">🔗 ส่งลิงก์เชิญ</button>` : ""}
-        <button class="b ${hosted ? "" : "p"}" id="syCode">📋 คัดลอกรหัสเชิญ</button>
+        ${hosted ? `<button class="b p" id="syShare">🔗 ลิงก์เชิญ (คัดลอก/ส่ง)</button>` : ""}
+        <button class="b ${hosted ? "" : "p"}" id="syCode">🔑 รหัสเชิญ</button>
       </div>
       ${hosted ? "" : `<p class="meta">ตอนนี้เปิดจากไฟล์ในเครื่อง จึงสร้างลิงก์ไม่ได้ ส่ง "รหัสเชิญ" ให้ผู้ร่วมทริปไปวางในช่อง "เข้าร่วม" ได้</p>`}
       <p class="meta">ผู้ที่มีลิงก์/รหัสแก้ไขหรือลบแผนได้ทุกอย่าง ส่งให้เฉพาะคนในครอบครัว</p>
       <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ ${isGuest() ? "ออกจากทริปร่วม" : "เลิกซิงก์"} (เก็บแผนไว้ในเครื่อง)</button><button class="b" id="sx">ปิด</button></div></div>`;
-    if ($("#syShare")) $("#syShare").onclick = async () => {
-      const url = inviteLink();
-      try{ if (navigator.share){ await navigator.share({ title:"เข้าร่วมแก้ไขทริปด้วยกัน", url }); return; } }catch(e){ if (e && e.name === "AbortError") return; }
-      copyText(url, "คัดลอกลิงก์เชิญแล้ว ส่งให้ผู้ร่วมทริปได้เลย");
-    };
-    $("#syCode").onclick = () => copyText(inviteCode(), "คัดลอกรหัสเชิญแล้ว");
+    if ($("#syShare")) $("#syShare").onclick = () => openLinkBox("ลิงก์เชิญเข้าร่วมทริป", inviteLink(), "ส่งลิงก์นี้ให้ผู้ร่วมทริป เปิดลิงก์แล้วตอบตกลงเพื่อเข้าร่วม (ต้องเป็นลิงก์นี้ ไม่ใช่ลิงก์ภาพของแผน)");
+    $("#syCode").onclick = () => openLinkBox("รหัสเชิญเข้าร่วมทริป", inviteCode(), "ใช้เมื่อส่งลิงก์ไม่ได้ ให้ผู้ร่วมทริปวางรหัสนี้ในช่อง \"เข้าร่วมทริปที่มีคนเชิญ\" (ปุ่ม แชร์ร่วมกัน)");
     $("#syOff").onclick = () => { if (confirm("เลิกซิงก์? แผนที่เห็นตอนนี้จะอยู่ในเครื่องนี้ต่อ แต่จะไม่อัปเดตกับกลุ่มอีก")){ leaveSync(); closeModal(); } };
   } else {
     m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แชร์ร่วมกัน</h2>
