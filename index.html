@@ -136,7 +136,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-24-g";
+const APP_VER = "2026-11-25-i";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -173,20 +173,59 @@ const VHINT = { fuel:{ range:"เช่น 600", warn:"เช่น 100", rest:"
 let veh = Object.assign({ type:"fuel", name:"", range:"", level:"", warn:"", rest:"" }, ls.get("trip.veh.v1", {}));
 
 // วางแผนว่าจะต้องเติม/ชาร์จที่ระยะกี่เมตรของเส้นทาง
-function planFuel(total){
+// startOverride = พลังงานที่เหลือตอนออกเดินทาง (เมตร) ถ้าไม่ระบุ ใช้ % ที่กรอก (ไม่กรอก = เต็ม)
+// kp = จุดเติม/ชาร์จที่ผู้ใช้รู้แล้วบนเส้นทาง [{pos, e, pct, name, kind}] — ถึงจุดนั้นก่อนหมด ไม่ต้องแนะนำปั๊มอื่น
+function planFuel(total, startOverride, kp = []){
   const full = (Number(veh.range) || 0)*1000, warnLeft = (Number(veh.warn) || 0)*1000;
-  const startAvail = full*(Number(veh.level) || 100)/100;      // ไม่กรอก % = เต็ม
-  if (!(full > 0)) return { events:[], remain:null, bad:false, unset:true };
-  if (warnLeft >= full) return { events:[], remain:null, bad:true };
-  const events = []; let base = 0, avail = startAvail;
-  while (events.length < 8){
+  const startAvail = (startOverride != null) ? Math.min(full, Math.max(0, startOverride)) : full*(Number(veh.level) || 100)/100;
+  if (!(full > 0)) return { events:[], known:[], remain:null, endAfter:null, bad:false, unset:true };
+  if (warnLeft >= full) return { events:[], known:[], remain:null, endAfter:null, bad:true };
+  const pts = kp.slice().sort((x, y) => x.pos - y.pos), events = [], known = [];
+  let base = 0, avail = startAvail, ki = 0, remain = null, guard = 0;
+  while (guard++ < 60 && events.length < 12){
+    while (ki < pts.length && pts[ki].pos <= base + 1) ki++;
+    const nk = pts[ki], segEnd = nk ? nk.pos : total;
+    const half = nk ? (Number(nk.e.detourKm) || 0) * 500 : 0;           // ครึ่งหนึ่งของระยะอ้อมไป-กลับ (เมตร)
+    const reach = avail - (segEnd - base) - half;
     const alertAt = base + Math.max(0, avail - warnLeft);
-    if (alertAt >= total) break;
-    events.push({ alertAt, emptyAt: base + avail, win:[alertAt, Math.min(base + avail, total)] });
-    base = alertAt; avail = full;   // สมมติว่าเติมเต็ม ณ จุดแนะนำ
+    if (reach >= warnLeft || (nk && alertAt >= segEnd && reach >= 0)){
+      if (!nk){ remain = reach; break; }
+      known.push({ name: nk.name, pos: nk.pos, remain: reach, pct: nk.pct, kind: nk.kind, e: nk.e, low: reach < warnLeft });
+      base = nk.pos; avail = Math.min(full, full * nk.pct / 100) - half; ki++;
+      continue;
+    }
+    const at = Math.min(alertAt, Math.max(base, segEnd - 1));
+    events.push({ alertAt: at, emptyAt: base + avail, win:[at, Math.min(base + avail, segEnd)], before: nk ? nk.name : null });
+    base = at; avail = full;                // สมมติว่าเติมเต็ม ณ จุดแนะนำ
   }
-  const remain = events.length ? full - (total - base) : startAvail - total;
-  return { events, remain, full, bad:false };
+  const last = known[known.length - 1], endsAtKnown = last && Math.abs(last.pos - total) < 2;
+  if (endsAtKnown) remain = last.remain;
+  const endAfter = endsAtKnown ? avail : remain;           // พลังงานหลังเติมที่จุดสิ้นสุดวัน (ถ้ามี)
+  return { events, known, remain, endAfter, full, startAvail, bad:false };
+}
+// ป้ายจุดเติม/ชาร์จของแต่ละจุด: p.energy = { type:"ev"|"fuel"|"both", pct, mins, detourKm, detourMin, note }
+function activeEnergy(p){
+  const e = p && p.energy; if (!e) return null;
+  return (e.type === "both" || e.type === veh.type) ? e : null;
+}
+const energyPct = e => Math.min(100, Math.max(1, Number(e && e.pct) || 100));
+function eb(p){
+  if (!p || !p.energy) return "";
+  const e = p.energy, ok = !!activeEnergy(p), ic = e.type === "ev" ? "⚡" : e.type === "fuel" ? "⛽" : "⚡⛽";
+  return `<span class="pill" style="${ok ? "" : "opacity:.5"}" title="${ok ? "" : "ไม่ตรงกับประเภทรถที่ตั้งไว้"}">${ic} ${energyPct(e)}%</span>`;
+}
+function effStay(x){      // เวลาที่ใช้ที่จุดนี้ (นาที) รวมเวลาเติม/ชาร์จ (ซ้อนกับเวลาแวะ) และเวลาอ้อม
+  const e = activeEnergy(x.p);
+  let st = x.kind === "stop" ? Number(stayOf(x.idx) || 0) : x.kind === "via" ? Number(x.p.stay || 0) : 0;
+  if (!e) return st;
+  const mins = (x.kind === "stop" || x.kind === "via") ? (Number(e.mins) || Number(veh.rest) || 0) : 0;
+  return Math.max(st, mins) + (Number(e.detourMin) || 0);
+}
+function seqPositions(legs){ const pos = [0]; let acc = 0; legs.forEach(l => { acc += l.distance; pos.push(acc); }); return pos; }
+function refuelPoints(seq, pos){
+  const out = [];
+  seq.forEach((x, k) => { const e = k > 0 && activeEnergy(x.p); if (e) out.push({ pos: pos[k], e, pct: energyPct(e), name: x.p.name, kind: x.kind }); });
+  return out;
 }
 function routePath(pts){
   const raw = routeData.geometry ? routeData.geometry.coordinates.map(c => ({ lat:c[1], lng:c[0] })) : pts;
@@ -234,16 +273,20 @@ async function renderFuel(day, pts, plan){
   const word = ev ? "สถานีชาร์จ" : "ปั๊มน้ำมัน", ico = ev ? "🔌" : "⛽";
   if (plan.unset){ box.innerHTML = `<div class="meta">กรอก "ระยะวิ่งสูงสุด" ของรถด้านบน เพื่อคำนวณจุด${ev ? "ชาร์จ" : "เติมน้ำมัน"}ตามเส้นทาง</div>`; return; }
   if (plan.bad){ box.innerHTML = `<div class="warn">ระยะ "แนะนำเมื่อเหลือ" ต้องน้อยกว่าระยะวิ่งสูงสุด</div>`; return; }
-  if (!plan.events.length){ box.innerHTML = `<div class="meta">✅ รถวิ่งถึงปลายทางได้โดยไม่ต้อง${ev?"ชาร์จ":"เติมน้ำมัน"}ระหว่างทาง</div>`; return; }
-  box.innerHTML = `<div class="meta">กำลังค้นหา${word}ตามเส้นทาง…</div>`;
-  let html = "";
+  const how = plan.startHow || "";
+  const head = `<div class="meta" style="margin-bottom:6px">ตอนออกเดินทางวันนี้ ${ev ? "แบตเหลือ" : "น้ำมันเหลือ"}ประมาณ <b>${Math.round(plan.startAvail/1000)} กม.</b> (${how})</div>`;
+  const knownHtml = plan.known.map(k => `<div class="st">${k.e.type === "ev" ? "⚡" : k.e.type === "fuel" ? "⛽" : "⚡⛽"} ถึง <b>${esc(k.name)}</b> (กม.ที่ ${(k.pos/1000).toFixed(0)}) ${ev ? "แบตเหลือ" : "น้ำมันเหลือ"}ประมาณ <b>${Math.max(0, Math.round(k.remain/1000))} กม.</b>
+      → ${ev ? "ชาร์จ" : "เติม"}ถึง ${k.pct}%${k.low ? ` <span class="warn">(ต่ำกว่าเกณฑ์ที่ตั้งไว้ ถึงแบบหวุดหวิด)</span>` : ""}</div>`).join("");
+  if (!plan.events.length){ box.innerHTML = head + knownHtml + `<div class="meta">✅ รถวิ่งถึงปลายทางได้โดยไม่ต้อง${ev?"ชาร์จ":"เติมน้ำมัน"}ระหว่างทาง</div>`; return; }
+  box.innerHTML = head + knownHtml + `<div class="meta">กำลังค้นหา${word}ตามเส้นทาง…</div>`;
+  let html = head + knownHtml;
   for (let i = 0; i < plan.events.length; i++){
     const e = plan.events[i], a = pointAt(path, e.alertAt);
     const sp = samplePath(path, e.win[0], e.win[1]);
     const list = await findStations(sp, ev, path, e.win[0], e.win[1]);
     if (my !== reqId) return;
     const gm = `https://www.google.com/maps/search/${encodeURIComponent(ev ? "EV charging station" : "gas station")}/@${a.lat},${a.lng},12z`;
-    html += `<div class="evh">ครั้งที่ ${i+1}: เริ่มแนะนำที่ ~กม.ที่ ${(e.alertAt/1000).toFixed(0)} · ควร${ev?"ชาร์จ":"เติม"}ก่อน ~กม.ที่ ${(e.win[1]/1000).toFixed(0)}${e.emptyAt > routeData.distance ? "" : " (พลังงานหมด)"}</div>`;
+    html += `<div class="evh">ครั้งที่ ${i+1}${e.before ? " (ก่อนถึง " + esc(e.before) + ")" : ""}: เริ่มแนะนำที่ ~กม.ที่ ${(e.alertAt/1000).toFixed(0)} · ควร${ev?"ชาร์จ":"เติม"}ก่อน ~กม.ที่ ${(e.win[1]/1000).toFixed(0)}${e.emptyAt > routeData.distance ? "" : " (พลังงานหมด)"}</div>`;
     if (MAP) MAP.marker({ lat:a.lat, lng:a.lng, label:"!", color:"#ea580c", z:300, tag:"fuel",
       popup: popEl(`<b>จุดเริ่มแนะนำ${ev?"ชาร์จ":"เติมน้ำมัน"}</b><br>ครั้งที่ ${i+1} · กม.ที่ ${(e.alertAt/1000).toFixed(0)}`) });
     if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (ต้องต่ออินเทอร์เน็ต) — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
@@ -357,8 +400,8 @@ function renderTabs(){
   $("#addDayTab").onclick = addDay;
 }
 
-function selectedIdx(){
-  const s = sel[cur] || {};
+function selectedIdx(i = cur){
+  const s = sel[i] || {};
   return Object.keys(s).filter(k => s[k]).map(Number);
 }
 const stayOf = (i) => (stays[cur + "_" + i] ?? trip.days[cur].stops[i].stay ?? 0);
@@ -389,35 +432,67 @@ async function load(){
   await update();
 }
 
-async function update(){
-  if (!trip.days[cur] || !tableData) return;
-  const my = ++reqId, day = trip.days[cur], T = tableData, M = T.M;
-  const picks = selectedIdx().filter(i => day.stops[i] && T.info[i])
+// จัดลำดับจุดของหนึ่งวัน: ต้นทาง → (จุดแวะที่เลือกในแต่ละช่วง) → จุดหมายหลัก → ... → ปลายทาง
+function buildSeq(day, T, idxs){
+  const picks = idxs.filter(i => day.stops[i] && T.info[i])
     .sort((a, b) => T.info[a].leg - T.info[b].leg || T.info[a].distance - T.info[b].distance);
   const mains = [day.start, ...(day.vias || []), day.end], seq = [];
-  for (let l = 0; l < M-1; l++){
+  for (let l = 0; l < T.M - 1; l++){
     seq.push({ p: mains[l], kind: l === 0 ? "start" : "via" });
     picks.filter(i => T.info[i].leg === l).forEach(i => seq.push({ p: day.stops[i], kind:"stop", idx:i }));
   }
   seq.push({ p: day.end, kind:"end" });
-  const pts = seq.map(x => x.p);
-  routeData = await getRoute(pts);
-  if (my !== reqId) return;
-  draw(day, picks, pts, seq);
+  if (day.lodging) seq.push({ p: day.lodging, kind:"lodging" });      // ที่พักคืนนี้ (ถ้าต่างจากปลายทาง)
+  return { picks, seq, pts: seq.map(x => x.p) };
+}
+// พลังงานที่เหลือตอนออกเดินทางของวัน i (เมตร) + คำอธิบาย
+// วันแรก: ตามป้ายจุดเริ่มต้น หรือ % ที่กรอก · วันถัดไป: ตั้งเอง "เติมเต็ม"/"ต่อจากเมื่อวาน" ได้ หรืออัตโนมัติ
+//   (ป้ายที่จุดเริ่มต้น → ป้ายที่ที่พักคืนก่อน → ต่อจากที่เหลือเมื่อสิ้นวันก่อน)
+async function startAvailFor(i){
+  const full = (Number(veh.range) || 0) * 1000, ev = veh.type === "ev", act = ev ? "ชาร์จ" : "เติม";
+  if (!(full > 0)) return { avail: null, how: "" };
+  const day = trip.days[i], pctOf = e => full * energyPct(e) / 100, se = activeEnergy(day.start);
+  if (i === 0) return se ? { avail: pctOf(se), how: act + "ที่จุดเริ่มต้น" } : { avail: null, how: "ตาม % ที่กรอก" };
+  if (day.fill === "full") return { avail: full, how: act + "เต็มตอนเช้า" };
+  if (day.fill !== "keep"){
+    if (se) return { avail: pctOf(se), how: act + "ที่จุดเริ่มต้น" };
+    const prev = trip.days[i-1], pe = activeEnergy(prev.lodging || prev.end);
+    if (pe) return { avail: pctOf(pe), how: act + "ที่ที่พักคืนก่อน" };
+  }
+  try{
+    const prev = trip.days[i-1], T = await getTable(prev), b = buildSeq(prev, T, selectedIdx(i-1));
+    const route = await getRoute(b.pts), sa = await startAvailFor(i-1);
+    const pl = planFuel(route.distance, sa.avail, refuelPoints(b.seq, seqPositions(route.legs)));
+    return { avail: (pl.unset || pl.bad || pl.remain == null) ? null : Math.max(0, pl.remain), how: "ต่อจากเมื่อวาน" };
+  }catch(e){ return { avail: null, how: "ต่อจากเมื่อวาน" }; }
 }
 
-async function draw(day, picks, pts, seq){
+async function update(){
+  if (!trip.days[cur] || !tableData) return;
+  const my = ++reqId, day = trip.days[cur], T = tableData;
+  const { picks, seq, pts } = buildSeq(day, T, selectedIdx());
+  routeData = await getRoute(pts);
+  if (my !== reqId) return;
+  const sa = await startAvailFor(cur);
+  if (my !== reqId) return;
+  const plan = planFuel(routeData.distance, sa.avail, refuelPoints(seq, seqPositions(routeData.legs)));
+  plan.startHow = sa.how;
+  draw(day, picks, pts, seq, plan);
+}
+
+async function draw(day, picks, pts, seq, plan){
   curPts = pts;
   const guest = isGuest();
   const T = tableData, direct = T.base, vias = day.vias || [];
   const mains = [day.start, ...vias, day.end];
   const est = routeData.est || T.est;
-  const viaStay = vias.reduce((s, v) => s + Number(v.stay || 0), 0);
-  const stayTotal = picks.reduce((s,i)=> s + Number(stayOf(i)||0), 0) + viaStay;
-  const extraDist = routeData.distance - direct.distance;
-  const extraTime = routeData.duration - direct.duration;
+  const stayTotal = seq.slice(1).reduce((s, x) => s + effStay(x), 0);          // รวมเวลาเติม/ชาร์จที่จุดที่ติดป้ายแล้ว
+  const detourKm = seq.reduce((s, x) => s + ((activeEnergy(x.p) || {}).detourKm || 0), 0);
+  const lodgeLeg = day.lodging ? routeData.legs[routeData.legs.length - 1] : null;   // ช่วงปลายทาง → ที่พัก ไม่นับเป็นส่วนเพิ่ม
+  const extraDist = routeData.distance - (lodgeLeg ? lodgeLeg.distance : 0) - direct.distance;
+  const extraTime = routeData.duration - (lodgeLeg ? lodgeLeg.duration : 0) - direct.duration;
   const dep = departs[cur] || day.depart || "";
-  const plan = planFuel(routeData.distance), isEV = veh.type === "ev";
+  const isEV = veh.type === "ev";
   const fuelMin = plan.events.length * Number(veh.rest || 0);
   const totalMin = routeData.duration/60 + stayTotal + fuelMin;
 
@@ -427,13 +502,14 @@ async function draw(day, picks, pts, seq){
     return `<div class="stop ${on?"sel":""}" data-i="${i}">
       <input type="checkbox" ${on?"checked":""} aria-label="${esc(s.name)}">
       <div style="flex:1">
-        <div class="nm">${esc(s.name)}</div>
+        <div class="nm">${esc(s.name)} ${eb(s)}</div>
         <div class="meta">จาก${T.M > 2 ? " " + esc(mains[t.leg].name) : "จุดเริ่มต้น"} <b>${fmtKm(t.distance)}</b> · <b>${fmtDur(t.duration)}</b></div>
         ${T.M > 2 ? `<div class="meta">อยู่ในช่วง ${esc(mains[t.leg].name)} → ${esc(mains[t.leg+1].name)}</div>` : ""}
         ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}
         <div class="meta" onclick="event.stopPropagation()">แวะประมาณ
           <input class="stay" type="number" min="0" step="5" value="${stayOf(i)}" data-stay="${i}"> นาที
-          <button class="b" data-del="${i}" style="padding:2px 8px;margin-left:6px" aria-label="ลบจุดแวะ">🗑</button></div>
+          <button class="b" data-en="stop:${i}" style="padding:2px 8px;margin-left:6px" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>
+          <button class="b" data-del="${i}" style="padding:2px 8px;margin-left:4px" aria-label="ลบจุดแวะ">🗑</button></div>
       </div></div>`;
   }).join("");
 
@@ -445,9 +521,9 @@ async function draw(day, picks, pts, seq){
   seq.slice(1).forEach((x, k) => {
     const leg = routeData.legs[k];
     if (dep) clock = addMin(clock, leg.duration/60);
-    const lbl = x.kind === "end" ? "ถึงปลายทาง" : x.kind === "via" ? "📍 ถึงจุดหมายหลัก" : "แวะ";
-    const st = x.kind === "stop" ? Number(stayOf(x.idx)||0) : x.kind === "via" ? Number(x.p.stay||0) : 0;
-    tl += `<li><div class="leg">🚗 ${fmtKm(leg.distance)} · ${fmtDur(leg.duration)}</div>${tm(clock)}<b>${lbl}</b> — ${esc(x.p.name)}`;
+    const lbl = x.kind === "end" ? "ถึงปลายทาง" : x.kind === "lodging" ? "🛏 ถึงที่พัก" : x.kind === "via" ? "📍 ถึงจุดหมายหลัก" : "แวะ";
+    const st = effStay(x), en = activeEnergy(x.p);
+    tl += `<li><div class="leg">🚗 ${fmtKm(leg.distance)} · ${fmtDur(leg.duration)}</div>${tm(clock)}<b>${lbl}</b> — ${esc(x.p.name)}${en ? " " + eb(x.p) : ""}`;
     if (st){ if (dep) clock = addMin(clock, st); tl += ` <span class="leg">(อยู่ ${st} นาที${dep ? " → ออก " + clock : ""})</span>`; }
     tl += `</li>`;
   });
@@ -470,15 +546,24 @@ async function draw(day, picks, pts, seq){
       <label>วันที่เดินทาง<input class="f" type="date" data-d="date" value="${esc(day.date || "")}"></label>
       <label>ชื่อวัน/หมายเหตุ<input class="f" data-d="label" value="${esc(day.label || "")}" placeholder="เช่น วันที่ 5 เหนือ"></label>
     </div>
-    <div class="sch"><span>🟢 เริ่มต้น: <b>${esc(day.start.name)}</b></span><button class="b" data-act="start">เปลี่ยน</button></div>
-    <div class="sch"><span>🔴 ปลายทางสุดท้าย: <b>${esc(day.end.name)}</b></span><button class="b" data-act="end">เปลี่ยน</button></div>
+    <div class="sch"><span>🟢 เริ่มต้น: <b>${esc(day.start.name)}</b> ${eb(day.start)}</span><span style="display:flex;gap:6px"><button class="b" data-en="start" aria-label="จุดเติม/ชาร์จ">⚡⛽</button><button class="b" data-act="start">เปลี่ยน</button></span></div>
+    ${cur > 0 && trip.days[cur-1] && hav(day.start, trip.days[cur-1].lodging || trip.days[cur-1].end) > 300
+      ? `<div class="warn" style="margin:-2px 0 6px">จุดเริ่มต้นวันนี้ไม่ตรงกับที่พัก/ปลายทางของวันก่อน (${esc((trip.days[cur-1].lodging || trip.days[cur-1].end).name)}) <button class="b" data-act="startprev" style="padding:2px 8px">ใช้เป็นต้นทาง</button></div>` : ""}
+    <div class="sch"><span>🔴 ปลายทางสุดท้าย: <b>${esc(day.end.name)}</b> ${eb(day.end)}</span><span style="display:flex;gap:6px"><button class="b" data-en="end" aria-label="จุดเติม/ชาร์จ">⚡⛽</button><button class="b" data-act="end">เปลี่ยน</button></span></div>
+    <div class="sch" style="flex-wrap:wrap"><span>🛏 ที่พักคืนนี้: ${day.lodging ? `<b>${esc(day.lodging.name)}</b> ${eb(day.lodging)}` : `<span class="meta">ใช้ปลายทางสุดท้ายเป็นที่พัก</span>`}</span>
+      <span style="display:flex;gap:6px;flex-wrap:wrap">
+        ${day.lodging ? `<button class="b" data-en="lodging" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>` : ""}
+        ${!day.lodging && cur > 0 && trip.days[cur-1] && (trip.days[cur-1].lodging || trip.days[cur-1].end) ? `<button class="b" data-act="samelodge">เหมือนคืนก่อน</button>` : ""}
+        <button class="b" data-act="lodging">${day.lodging ? "เปลี่ยน" : "ตั้งที่พัก"}</button>
+        ${day.lodging ? `<button class="b" data-act="rmlodge">ลบ</button>` : ""}</span></div>
     <div class="cat" style="margin-top:12px">📍 จุดหมายหลักระหว่างวัน <span class="meta">(ต้องไปทุกที่ เรียงตามลำดับ)</span></div>
     ${vias.map((v, j) => `<div class="sch" style="flex-wrap:wrap">
-        <span><b>${j+1}. ${esc(v.name)}</b></span>
+        <span><b>${j+1}. ${esc(v.name)}</b> ${eb(v)}</span>
         <span class="meta">อยู่ที่นี่ <input class="stay" type="number" min="0" step="5" value="${Number(v.stay || 0)}" data-vstay="${j}"> นาที</span>
         <span style="display:flex;gap:6px;width:100%;justify-content:flex-end">
           <button class="b" data-vmv="${j}:-1" ${j === 0 ? "disabled" : ""} aria-label="เลื่อนขึ้น">⬆️</button>
           <button class="b" data-vmv="${j}:1" ${j === vias.length-1 ? "disabled" : ""} aria-label="เลื่อนลง">⬇️</button>
+          <button class="b" data-en="via:${j}" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>
           <button class="b" data-vdel="${j}" aria-label="ลบ">🗑</button></span></div>`).join("")
       || `<div class="meta">ยังไม่มี — ใช้เมื่อวันนี้ต้องไปมากกว่า 1 ที่ เช่น ต้นทาง → ที่ A → ที่ B → ปลายทาง (จุดแวะที่เลือกหรือไม่เลือกได้ แยกอยู่ด้านล่าง)</div>`}
     <div class="row"><button class="b p" data-act="addvia">＋ เพิ่มจุดหมายหลัก</button></div>
@@ -497,7 +582,7 @@ async function draw(day, picks, pts, seq){
   <div class="card">
     <h2>สรุปแผนของวันนี้ (${picks.length} จุดแวะ)</h2>
     <div class="sum">
-      <div><b>${fmtKm(routeData.distance)}</b><span>ระยะทางรวม</span></div>
+      <div><b>${fmtKm(routeData.distance + detourKm * 1000)}</b><span>ระยะทางรวม${detourKm ? " (รวมอ้อมไปจุดเติม " + detourKm + " กม.)" : ""}</span></div>
       <div><b>${fmtDur(routeData.duration)}</b><span>เวลาขับรถรวม</span></div>
       <div><b>+${fmtKm(Math.max(0,extraDist))}</b><span>เพิ่มจากเส้นทางตรง</span></div>
       <div><b>+${fmtDur(Math.max(0,extraTime))}</b><span>ขับเพิ่ม</span></div>
@@ -518,10 +603,16 @@ async function draw(day, picks, pts, seq){
         <option value="ev" ${isEV?"selected":""}>รถไฟฟ้า (EV)</option></select></label>
       <label>ชื่อ/รุ่นรถ (ไม่บังคับ)<input class="f" data-v="name" value="${esc(veh.name)}" placeholder="เช่น Fortuner"></label>
       <label>ระยะวิ่งสูงสุดต่อ${isEV ? "การชาร์จเต็ม" : "น้ำมัน 1 ถังเต็ม"} (กม.)<input class="f" type="number" inputmode="numeric" min="1" data-v="range" value="${veh.range}" placeholder="${VHINT[veh.type].range}"></label>
-      <label>${isEV ? "แบตเตอรี่" : "น้ำมัน"}ตอนออกเดินทาง (%)<input class="f" type="number" inputmode="numeric" min="1" max="100" data-v="level" value="${veh.level}" placeholder="ไม่กรอก = เต็ม 100"></label>
+      <label>${isEV ? "แบตเตอรี่" : "น้ำมัน"}ตอนออกเดินทาง วันแรก (%)<input class="f" type="number" inputmode="numeric" min="1" max="100" data-v="level" value="${veh.level}" placeholder="ไม่กรอก = เต็ม 100"></label>
       <label>เริ่มแนะนำ${isEV ? "สถานีชาร์จ" : "ปั๊ม"}เมื่อเหลือระยะวิ่ง (กม.)<input class="f" type="number" inputmode="numeric" min="0" data-v="warn" value="${veh.warn}" placeholder="${VHINT[veh.type].warn}"></label>
       <label>เวลา${isEV ? "ชาร์จ" : "เติมน้ำมัน"}ต่อครั้ง (นาที)<input class="f" type="number" inputmode="numeric" min="0" data-v="rest" value="${veh.rest}" placeholder="${VHINT[veh.type].rest}"></label>
     </div>
+    ${cur > 0 ? `<label class="meta" style="display:block;margin-top:8px">ต้นวันนี้ (${esc(dayName(day, cur))})<select class="f" id="dayFill" style="margin-top:2px">
+        <option value="auto" ${day.fill === "full" || day.fill === "keep" ? "" : "selected"}>อัตโนมัติ (ตามป้ายจุดเติม/ชาร์จที่พัก ถ้าไม่มีให้ต่อจากเมื่อวาน)</option>
+        <option value="full" ${day.fill === "full" ? "selected" : ""}>${isEV ? "ชาร์จ" : "เติม"}เต็มตอนเช้า</option>
+        <option value="keep" ${day.fill === "keep" ? "selected" : ""}>ใช้${isEV ? "แบต" : "น้ำมัน"}ที่เหลือต่อจากเมื่อวาน (ไม่${isEV ? "ชาร์จ" : "เติม"}ข้ามคืน)</option></select></label>`
+      : `<div class="meta" style="margin-top:8px">วันแรก: เริ่มด้วย ${isEV ? "แบตเตอรี่" : "น้ำมัน"}ตาม % ที่กรอกด้านบน (หรือที่จุดเริ่มต้นที่ติดป้ายเติม/ชาร์จไว้)</div>`}
+    <div class="meta" style="margin-top:6px">ที่พัก/ปลายทางที่ติดป้าย ⚡⛽ ระบบถือว่า${isEV ? "ชาร์จ" : "เติม"}ข้ามคืน วันถัดไปเริ่มที่ % ที่ตั้งไว้</div>
     <div id="fuelBox"></div>
   </div>
 
@@ -531,6 +622,7 @@ async function draw(day, picks, pts, seq){
         <option value="route">ตลอดเส้นทางของวันนี้</option>
         <option value="dest">ใกล้ปลายทางสุดท้าย</option>
         <option value="start">ใกล้จุดเริ่มต้น</option>
+        ${day.lodging ? `<option value="lodge">ใกล้ที่พัก</option>` : ""}
         ${vias.map((v, j) => `<option value="via${j}">ใกล้ ${esc(v.name)}</option>`).join("")}</select></label>
     <div id="recBox" style="margin-top:10px"></div>
     <div class="meta" style="margin-top:10px"><span id="gline">${googleLine()}</span>
@@ -581,6 +673,7 @@ async function draw(day, picks, pts, seq){
     else veh[k] = el.value === "" ? "" : Math.max(0, +el.value || 0);
     ls.set("trip.veh.v1", veh); update();
   });
+  document.querySelectorAll("[data-en]").forEach(b => b.onclick = e => { e.stopPropagation(); openEnergy(b.dataset.en); });
   document.querySelectorAll("[data-del]").forEach(b => b.onclick = e => { e.stopPropagation(); if (confirm("ลบจุดแวะนี้?")) dropStop(+b.dataset.del); });
   document.querySelectorAll("[data-d]").forEach(el => el.onchange = () => { trip.days[cur][el.dataset.d] = el.value; saveTrip(); renderTabs(); });
   document.querySelectorAll("[data-act]").forEach(b => b.onclick = () => act(b.dataset.act));
@@ -590,6 +683,7 @@ async function draw(day, picks, pts, seq){
   document.querySelectorAll("[data-vmv]").forEach(b => b.onclick = () => { const [j, d] = b.dataset.vmv.split(":").map(Number); moveVia(j, d); });
   document.querySelectorAll("[data-vdel]").forEach(b => b.onclick = () => { if (confirm("ลบจุดหมายหลักนี้?")) dropVia(+b.dataset.vdel); });
   $("#recScope").onchange = e => { recScope = e.target.value; if (recStarted) runRec(recCat); showRec(); };
+  if ($("#dayFill")) $("#dayFill").onchange = e => { day.fill = e.target.value; saveTrip(); update(); };
   refreshGoogleUI();
   if ($("#recSet")) $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
   if ($("#shLink")){ $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile; }
@@ -647,7 +741,7 @@ function addDay(){
     trip.days.push({ label: "", date, depart: "", start: place(s), end: place(e), vias: [], stops: [] });
     saveTrip(); recMem = {}; cur = trip.days.length-1; renderTabs(); load();
   };
-  if (prev) openPicker("เลือกปลายทางของวันใหม่ (เริ่มจากปลายทางของวันก่อน)", e => make(prev.end, e));
+  if (prev) openPicker("เลือกปลายทางของวันใหม่ (เริ่มจากที่พัก/ปลายทางของวันก่อน)", e => make(prev.lodging || prev.end, e));
   else openPicker("① เลือกจุดเริ่มต้น", s => setTimeout(() => openPicker("② เลือกปลายทาง", e => make(s, e)), 50));
 }
 function moveVia(j, d){
@@ -674,10 +768,59 @@ function act(a){
   if (a === "start") openPicker("เลือกจุดเริ่มต้น", p => { day.start = place(p); saveTrip(); load(); });
   else if (a === "end") openPicker("เลือกปลายทาง", p => { day.end = place(p); saveTrip(); load(); });
   else if (a === "addstop") openPicker("เพิ่มจุดแวะ", p => addStop(p));
+  else if (a === "lodging") openPicker("เลือกที่พักคืนนี้", p => { day.lodging = place(p); saveTrip(); recMem = {}; load(); });
+  else if (a === "rmlodge"){ delete day.lodging; saveTrip(); recMem = {}; load(); }
+  else if (a === "samelodge"){
+    const base = trip.days[cur-1] && (trip.days[cur-1].lodging || trip.days[cur-1].end);
+    if (base){ day.lodging = JSON.parse(JSON.stringify(base)); saveTrip(); recMem = {}; load(); }
+  }
+  else if (a === "startprev"){
+    const base = trip.days[cur-1] && (trip.days[cur-1].lodging || trip.days[cur-1].end);
+    if (base){ day.start = place(base); saveTrip(); load(); }
+  }
   else if (a === "addvia") openPicker("เพิ่มจุดหมายหลัก (ที่ต้องไป)", p => {
     day.vias = day.vias || []; day.vias.push(Object.assign(place(p), { stay: 0, note: "" })); saveTrip(); recMem = {}; load(); });
   else if (a === "addday") addDay();
   else if (a === "delday") delDay();
+}
+
+/* ---------- ป้ายจุดเติม/ชาร์จของแต่ละจุด ---------- */
+function getPlaceRef(day, ref){
+  const [k, i] = ref.split(":");
+  return k === "start" ? day.start : k === "end" ? day.end : k === "lodging" ? day.lodging : k === "via" ? (day.vias || [])[+i] : k === "stop" ? day.stops[+i] : null;
+}
+function openEnergy(ref){
+  const day = trip.days[cur], p = getPlaceRef(day, ref); if (!p) return;
+  const kind = ref.split(":")[0], ev = veh.type === "ev", e = p.energy || {};
+  const overnight = kind === "end" || kind === "lodging", start = kind === "start";
+  const m = $("#modal"); m.hidden = false;
+  m.innerHTML = `<div class="mbox"><h2>⚡⛽ จุดเติม/ชาร์จที่ ${esc(p.name)}</h2>
+    <p class="meta" style="margin:2px 0 6px"><b>เติมน้ำมัน/ชาร์จแบตได้ที่นี่ หรือบริเวณใกล้เคียง</b> ตั้งค่าแล้วกดบันทึก</p>
+    <div id="enbox">
+      <div class="vgrid">
+        <label>ชนิด<select class="f" id="entype">
+          <option value="ev">⚡ ชาร์จรถไฟฟ้า</option><option value="fuel">⛽ เติมน้ำมัน</option><option value="both">⚡⛽ ทั้งสองอย่าง</option></select></label>
+        <label>เติม/ชาร์จถึง (%)<input class="f" id="enpct" type="number" min="1" max="100" inputmode="numeric" value="${e.pct != null ? Number(e.pct) : 100}"></label>
+        ${overnight || start ? "" : `<label>เวลาเติม/ชาร์จ (นาที)<input class="f" id="enmins" type="number" min="0" inputmode="numeric" value="${e.mins != null && e.mins !== "" ? Number(e.mins) : ""}" placeholder="${veh.rest ? veh.rest : "เช่น " + (ev ? 40 : 10)}"></label>`}
+        <label>ระยะอ้อมไป-กลับ (กม.)<input class="f" id="endk" type="number" min="0" inputmode="decimal" value="${Number(e.detourKm) || 0}"></label>
+        <label>เวลาอ้อม (นาที)<input class="f" id="endm" type="number" min="0" inputmode="numeric" value="${Number(e.detourMin) || 0}"></label>
+        <label style="grid-column:1/-1">หมายเหตุ<input class="f" id="ennote" value="${esc(e.note || "")}" placeholder="เช่น ที่ชาร์จในโรงแรม ชั้น B1"></label>
+      </div>
+      <p class="meta" style="margin:6px 0">${overnight ? "จุดนี้เป็นที่ค้างคืน ระบบถือว่า" + (ev ? "ชาร์จ" : "เติม") + "ข้ามคืน วันถัดไปเริ่มที่ % ที่ตั้งไว้ (ไม่บวกเวลาเพิ่ม)"
+        : start ? "ระบบถือว่า" + (ev ? "ชาร์จ" : "เติม") + "ก่อนออกเดินทาง วันนี้เริ่มที่ % ที่ตั้งไว้"
+        : "ถึงจุดนี้ก่อนหมด ระบบไม่แนะนำปั๊มอื่นก่อนหน้า และเริ่มนับใหม่จาก % ที่ตั้งไว้ เวลาเติมนับซ้อนกับเวลาแวะ (บวกเฉพาะส่วนที่เกิน)"}
+        ป้ายที่ไม่ตรงกับประเภทรถที่ตั้งไว้จะถูกข้าม</p>
+    </div>
+    <div class="row"><button class="b p" id="ensave">บันทึก</button>${p.energy ? `<button class="b" id="endel" style="color:var(--red)">ลบป้ายนี้</button>` : ""}<button class="b" id="enx">ปิด</button></div></div>`;
+  $("#entype").value = e.type || veh.type;
+  $("#ensave").onclick = () => {
+    const n = id => { const el = $(id); return el ? Math.max(0, +el.value || 0) : 0; };
+    p.energy = { type: $("#entype").value, pct: Math.min(100, Math.max(1, +$("#enpct").value || 100)),
+      mins: $("#enmins") && $("#enmins").value !== "" ? n("#enmins") : "", detourKm: n("#endk"), detourMin: n("#endm"), note: $("#ennote").value.slice(0, 120) };
+    saveTrip(); closeModal(); update();
+  };
+  if ($("#endel")) $("#endel").onclick = () => { delete p.energy; saveTrip(); closeModal(); update(); };
+  $("#enx").onclick = closeModal; m.onclick = ev2 => { if (ev2.target === m) closeModal(); };
 }
 
 /* ---------- ค้นหาสถานที่ / ปักหมุด ---------- */
@@ -772,6 +915,7 @@ function project(path, lat, lng){
 function recCenters(scope, path, day, google){
   const total = path[path.length-1].cum;
   if (/^via\d+$/.test(scope)){ const v = (day.vias || [])[+scope.slice(3)]; if (v) return { pts:[v], r:10000 }; }
+  if (scope === "lodge" && day.lodging) return { pts:[day.lodging], r:10000 };
   if (scope === "dest") return { pts:[day.end], r:10000 };
   if (scope === "start") return { pts:[day.start], r:10000 };
   if (google){
@@ -967,10 +1111,18 @@ function showRec(){
 /* ---------- แชร์ / สำรอง / นำเข้าแผนทริป ---------- */
 function numOrNull(v){ return (v === null || v === undefined || v === "" || !Number.isFinite(+v)) ? null : +v; }
 function str(v, n = 120){ return String(v ?? "").slice(0, n); }
+function cleanEnergy(e){
+  if (!e || typeof e !== "object") return null;
+  const n = (v, mx) => { const x = numOrNull(v); return x === null ? 0 : Math.min(mx, Math.max(0, x)); };
+  return { type: e.type === "ev" || e.type === "fuel" ? e.type : "both", pct: Math.min(100, Math.max(1, numOrNull(e.pct) || 100)),
+    mins: numOrNull(e.mins) === null ? "" : n(e.mins, 600), detourKm: n(e.detourKm, 500), detourMin: n(e.detourMin, 600), note: str(e.note, 120) };
+}
 function cleanPlace(p){
   const lat = numOrNull(p && p.lat), lng = numOrNull(p && p.lng);
   if (lat === null || lng === null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
-  return { name: str(p.name, 100) || "ไม่ระบุชื่อ", lat, lng };
+  const out = { name: str(p.name, 100) || "ไม่ระบุชื่อ", lat, lng }, en = cleanEnergy(p.energy);
+  if (en) out.energy = en;
+  return out;
 }
 // ล้างข้อมูลที่รับมาจากภายนอก (ไฟล์/ลิงก์/JSON) ให้เป็นรูปแบบที่ปลอดภัย
 // Firebase เก็บ array ว่างเป็นค่าว่าง และบางครั้งคืนค่า array เป็น object → แปลงให้เป็น array เสมอ
@@ -991,7 +1143,8 @@ function cleanTrip(t){
       p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 200); vias.push(p);
     }
     days.push({ label: str(d.label, 60), date: /^\d{4}-\d{2}-\d{2}$/.test(d.date) ? d.date : "",
-      depart: /^\d{2}:\d{2}$/.test(d.depart) ? d.depart : "", start: s, end: e, vias, stops });
+      depart: /^\d{2}:\d{2}$/.test(d.depart) ? d.depart : "", fill: d.fill === "full" || d.fill === "keep" ? d.fill : "auto", start: s, end: e, vias, stops });
+    if (d.lodging){ const lp = cleanPlace(d.lodging); if (lp) days[days.length-1].lodging = lp; }
   }
   return { title: str(t.title, 80), days };
 }
@@ -1558,6 +1711,7 @@ function drawMapBody(day, picks, seq){
   seq.forEach((x, k) => {
     if (x.kind === "start") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"▶", color:"#16a34a", z:500, tag:"route", popup:popEl("<b>เริ่มต้น</b><br>" + esc(x.p.name)) });
     else if (x.kind === "end") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"⚑", color:"#dc2626", z:500, tag:"route", popup:popEl("<b>ปลายทางสุดท้าย</b><br>" + esc(x.p.name)) });
+    else if (x.kind === "lodging") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"🛏", color:"#4f46e5", z:480, tag:"route", popup:popEl("<b>ที่พักคืนนี้</b><br>" + esc(x.p.name)) });
     else if (x.kind === "via") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"★", color:"#9333ea", z:450, tag:"route",
       popup:popEl("<b>จุดหมายหลัก</b><br>" + esc(x.p.name) + (x.p.stay ? "<br>อยู่ " + Number(x.p.stay) + " นาที" : "")) });
   });
