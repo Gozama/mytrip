@@ -136,7 +136,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-25-i";
+const APP_VER = "2026-11-25-j";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -149,6 +149,32 @@ const ls = {
     if (SYNC_KEYS.has(k) && globalThis.__syncHook) globalThis.__syncHook();   // ส่งการเปลี่ยนแปลงไปให้กลุ่ม (ถ้าเปิดซิงก์)
   }
 };
+
+// บันทึกแคชลงเครื่อง: จำกัดขนาด (~2.4MB) ลบรายการเก่าสุดก่อน โดยเริ่มจากผลแนะนำสถานที่ที่ใหญ่ — กัน localStorage เต็มแล้วจำค่าไม่ได้
+function saveCache(){
+  const MAX = 2400000, keys = Object.keys(cache), sizes = {};
+  let total = 0;
+  keys.forEach(k => { try{ sizes[k] = JSON.stringify(cache[k]).length; }catch(e){ sizes[k] = 0; } total += sizes[k]; });
+  if (total > MAX){
+    for (const k of keys.filter(k => k.startsWith("REC")).concat(keys.filter(k => !k.startsWith("REC")))){
+      delete cache[k]; total -= sizes[k]; if (total <= MAX * 0.75) break;
+    }
+  }
+  try{ localStorage.setItem(LS.cache, JSON.stringify(cache)); }
+  catch(e){                       // เต็มจริง: ลบครึ่งหนึ่งแล้วลองใหม่
+    Object.keys(cache).slice(0, Math.ceil(Object.keys(cache).length / 2)).forEach(k => delete cache[k]);
+    try{ localStorage.setItem(LS.cache, JSON.stringify(cache)); }catch(e2){}
+  }
+}
+// ลดจำนวนจุดของเส้นทางที่เก็บ (เส้นทางจริงอาจมีหลายพันจุด) เก็บสูงสุด ~1000 จุด พอสำหรับวาดแผนที่และคำนวณ
+function slimGeom(g, max = 1000){
+  if (!g || !g.coordinates || g.coordinates.length <= max) return g;
+  const c = g.coordinates, step = (c.length - 1) / (max - 1), out = [];
+  for (let i = 0; i < max - 1; i++) out.push(c[Math.round(i * step)]);
+  out.push(c[c.length - 1]);
+  return { type: g.type, coordinates: out };
+}
+const failUntil = {};     // ค้นหาปั๊ม/ที่ชาร์จล้มเหลว → พักไว้ 5 นาที ไม่ยิงซ้ำทุกครั้งที่สลับวัน
 
 let trip = ls.get(LS.trip, DEFAULT_TRIP);
 let sel = ls.get(LS.sel, {});       // { dayIndex: { stopIndex: true } }
@@ -243,16 +269,17 @@ function samplePath(path, from, to){
 }
 async function overpass(q){
   for (const h of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]){
-    try{ const j = await fetchJSON(h + "?data=" + encodeURIComponent(q), 25000); if (j.elements) return j.elements; }catch(e){}
+    try{ const j = await fetchJSON(h + "?data=" + encodeURIComponent(q), 20000); if (j.elements) return j.elements; }catch(e){}
   }
   return null;
 }
 async function findStations(sp, ev, path, from, to){
   const key = "O|" + ev + "|" + sp.map(p => p.lat.toFixed(3)+","+p.lng.toFixed(3)).join(";");
   if (cache[key]) return cache[key];
+  if (failUntil[key] > Date.now()) return null;
   const tag = ev ? "charging_station" : "fuel";
   const q = `[out:json][timeout:25];nwr["amenity"="${tag}"](around:3000,${sp.map(p => p.lat.toFixed(5)+","+p.lng.toFixed(5)).join(",")});out center 80;`;
-  const els = await overpass(q); if (!els) return null;
+  const els = await overpass(q); if (!els){ failUntil[key] = Date.now() + 5 * 60 * 1000; return null; }
   const list = els.map(e => {
     const lat = e.lat ?? e.center?.lat, lng = e.lon ?? e.center?.lon; if (lat == null) return null;
     let best = null, bd = 1e12;
@@ -264,7 +291,7 @@ async function findStations(sp, ev, path, from, to){
     .sort((a, b) => a.along - b.along);
   // ตัดซ้ำที่อยู่ใกล้กันมาก แล้วเก็บไม่เกิน 8 แห่ง
   const out = []; list.forEach(s => { if (!out.some(o => hav(o, s) < 80)) out.push(s); });
-  cache[key] = out.slice(0, 8); try{ ls.set(LS.cache, cache); }catch(e){}
+  cache[key] = out.slice(0, 8); saveCache();
   return cache[key];
 }
 async function renderFuel(day, pts, plan){
@@ -289,7 +316,7 @@ async function renderFuel(day, pts, plan){
     html += `<div class="evh">ครั้งที่ ${i+1}${e.before ? " (ก่อนถึง " + esc(e.before) + ")" : ""}: เริ่มแนะนำที่ ~กม.ที่ ${(e.alertAt/1000).toFixed(0)} · ควร${ev?"ชาร์จ":"เติม"}ก่อน ~กม.ที่ ${(e.win[1]/1000).toFixed(0)}${e.emptyAt > routeData.distance ? "" : " (พลังงานหมด)"}</div>`;
     if (MAP) MAP.marker({ lat:a.lat, lng:a.lng, label:"!", color:"#ea580c", z:300, tag:"fuel",
       popup: popEl(`<b>จุดเริ่มแนะนำ${ev?"ชาร์จ":"เติมน้ำมัน"}</b><br>ครั้งที่ ${i+1} · กม.ที่ ${(e.alertAt/1000).toFixed(0)}`) });
-    if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (ต้องต่ออินเทอร์เน็ต) — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
+    if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (เซิร์ฟเวอร์ตอบช้าหรือไม่มีอินเทอร์เน็ต) <button class="b" data-fretry style="padding:2px 8px">🔄 ลองใหม่</button> — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
     else if (!list.length) html += `<div class="warn">ไม่พบ${word}ในช่วงนี้ในแผนที่ OpenStreetMap — <a target="_blank" rel="noopener" href="${gm}">ลองค้นใน Google Maps</a></div>`;
     else list.forEach(s => {
       html += `<div class="st">${ico} <b>${esc(s.name)}</b>${s.sub ? ` <span class="meta">(${esc(s.sub)})</span>` : ""}<br>
@@ -301,6 +328,7 @@ async function renderFuel(day, pts, plan){
     });
   }
   box.innerHTML = html;
+  box.querySelectorAll("[data-fretry]").forEach(b => b.onclick = () => { for (const k in failUntil) delete failUntil[k]; renderFuel(day, pts, plan); });
 }
 
 /* ---------- รูปแบบเวลา/ระยะทาง ---------- */
@@ -350,7 +378,7 @@ async function getTable(day){
           dist[i].push(j.distances[i][k] ?? e.distance); dur[i].push(j.durations[i][k] ?? e.duration);
         }
       }
-      T = { M, dist, dur }; cache[key] = T; try{ ls.set(LS.cache, cache); }catch(e){}
+      T = { M, dist, dur }; cache[key] = T; saveCache();
     }catch(e){
       T = { M, est:true, dist: mains.map(m => pts.map(p => estimate(m, p).distance)), dur: mains.map(m => pts.map(p => estimate(m, p).duration)) };
     }
@@ -377,8 +405,8 @@ async function getRoute(pts){
     const j = await fetchJSON(`${OSRM}/route/v1/driving/${coordStr(pts)}?overview=full&geometries=geojson`);
     if (j.code !== "Ok") throw 0;
     const r = j.routes[0];
-    const out = { distance: r.distance, duration: r.duration, legs: r.legs.map(l => ({ distance:l.distance, duration:l.duration })), geometry: r.geometry };
-    cache[key] = out; try{ ls.set(LS.cache, cache); }catch(e){}
+    const out = { distance: r.distance, duration: r.duration, legs: r.legs.map(l => ({ distance:l.distance, duration:l.duration })), geometry: slimGeom(r.geometry) };
+    cache[key] = out; saveCache();
     return out;
   }catch(e){
     const legs = []; for (let i=0;i<pts.length-1;i++) legs.push(estimate(pts[i], pts[i+1]));
@@ -991,7 +1019,7 @@ async function recOSM(k, scope, path, day){
     els = await overpass(`[out:json][timeout:25];(${body});out center tags 250;`);
     if (!els) throw new Error("ค้นหาไม่ได้");
     els = els.map(e => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, t: slimTags(e.tags || {}) })).filter(e => e.lat != null);
-    try{ cache[key] = els; ls.set(LS.cache, cache); }catch(e){}
+    cache[key] = els; saveCache();
   }
   const items = els.map(e => {
     const pr = project(path, e.lat, e.lng), t = e.t;
@@ -1023,12 +1051,33 @@ async function osmPhoto(p){
   return "";
 }
 const recKey = () => cur + "|" + recScope;
+// จำผลแนะนำสถานที่ไว้ในเครื่อง (12 ชั่วโมง) แม้รีโหลดหน้า/สลับวัน/แก้จุดแวะ เพื่อไม่ต้องค้นซ้ำ (ประหยัดโควตา Google ด้วย)
+const RECSTORE = "trip.recstore.v1", REC_TTL = 12 * 3600 * 1000;
+let recStore = ls.get(RECSTORE, {});
+function recSig(d, scope){
+  const day = trip.days[d], f = q => q.lat.toFixed(3) + "," + q.lng.toFixed(3);
+  return [f(day.start), ...(day.vias || []).map(f), f(day.end), day.lodging ? f(day.lodging) : "", scope, gkey ? "g" : "o", veh.type].join("|");
+}
+function saveRecStore(){
+  const now = Date.now();
+  let ents = Object.entries(recStore).filter(([, v]) => v && v.t > now - REC_TTL).sort((a, b) => b[1].t - a[1].t).slice(0, 30);
+  let out = Object.fromEntries(ents), txt = JSON.stringify(out);
+  while (txt.length > 1200000 && ents.length > 1){ ents.pop(); out = Object.fromEntries(ents); txt = JSON.stringify(out); }
+  recStore = out; try{ localStorage.setItem(RECSTORE, txt); }catch(e){}
+}
 async function runRec(k, force){
   const d = cur, scope = recScope, key = recKey();
   recMem[key] = recMem[key] || {};
   if (recMem[key][k] && !force){ showRec(); return; }
   if (recMem[key][k]?.loading) return;
   if (!curPts || !routeData){ return; }
+  const sig = recSig(d, scope), st = recStore[sig];
+  if (!force && st && st.t > Date.now() - REC_TTL && st.k && st.k[k] && st.k[k].items){      // ใช้ผลที่จำไว้
+    const path0 = routePath(curPts), items = st.k[k].items;
+    items.forEach(it => { const pr = project(path0, it.lat, it.lng); it.along = pr.along; it.off = pr.off; });   // คำนวณตำแหน่งตามเส้นทางปัจจุบันใหม่
+    recMem[key][k] = { items, shown:3, source: st.k[k].source, note: st.k[k].note || "", savedAt: st.t };
+    showRec(); return;
+  }
   if (!gkey && sync && cfgNow().gid && !unlockAsked){ unlockAsked = true; openUnlock(); }   // ผู้ร่วมทริป: ถามรหัสผ่านครั้งแรก
   recMem[key][k] = { loading:true };
   showRec();
@@ -1041,6 +1090,8 @@ async function runRec(k, force){
     }
     if (!items) items = await recOSM(k, scope, path, day);
     recMem[key][k] = { items, shown:3, source, note };
+    const ent = recStore[sig] = recStore[sig] || { t: Date.now(), k: {} };
+    ent.t = Date.now(); ent.k[k] = { items, source, note }; saveRecStore();
   }catch(e){
     recMem[key][k] = { error:"ค้นหาไม่ได้ ต้องต่ออินเทอร์เน็ต ลองใหม่อีกครั้ง" };
   }
@@ -1062,6 +1113,7 @@ function showRec(){
   } else {
     const list = slot.items.slice(0, slot.shown);
     if (slot.note) html += `<div class="warn" style="margin-top:8px">${esc(slot.note)}</div>`;
+    if (slot.savedAt) html += `<div class="meta" style="margin-top:8px">🕘 ผลที่จำไว้ในเครื่อง (ค้นหาเมื่อ ${new Date(slot.savedAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" })}) กด "ค้นหาใหม่" เพื่ออัปเดต</div>`;
     html += slot.source === "google"
       ? `<div class="meta" style="margin-top:8px">เรียงตามคะแนนรีวิว Google (ถ่วงด้วยจำนวนรีวิว) · รูปจาก Google อาจมีค่าบริการแยก ดูเมนู ⚙️</div>`
       : `<div class="meta" style="margin-top:8px">⚠ ข้อมูลจาก OpenStreetMap <b>ไม่มีคะแนนรีวิว</b> — เรียงตามความโดดเด่น/ความครบของข้อมูล รูปมีเฉพาะสถานที่ที่มีรูปใน Wikipedia/Wikimedia กด "ดูรีวิว" เพื่อดูคะแนนใน Google Maps</div>`;
@@ -1564,7 +1616,7 @@ function openSettings(){
     if (mapPref === "google") switchMap(); else if (trip.days[cur]) showRec();
   };
   $("#gclear").onclick = () => { gkey = ""; ls.set(GKEY, ""); gsrc = ""; ls.set("trip.gsrc.v1", ""); $("#gkey").value = ""; $("#gst").textContent = mask(""); recMem = {}; if (mapPref === "google") switchMap(); else showRec(); };
-  $("#gcache").onclick = () => { cache = {}; ls.set(LS.cache, cache); recMem = {}; alert("ล้างแคชแล้ว ข้อมูลจะถูกคำนวณใหม่เมื่อเปิดครั้งถัดไป"); };
+  $("#gcache").onclick = () => { cache = {}; ls.set(LS.cache, cache); recMem = {}; recStore = {}; ls.set(RECSTORE, {}); for (const k in failUntil) delete failUntil[k]; alert("ล้างแคชแล้ว ข้อมูลจะถูกคำนวณใหม่เมื่อเปิดครั้งถัดไป"); };
   $("#gall").onclick = () => { if (confirm("ล้างกำหนดการและข้อมูลรถทั้งหมด? (API key และธีมจะยังอยู่)")){ closeModal(); resetAll(); } };
   renderUse(); $("#gon").checked = cfgNow().on; $("#glim").value = cfgNow().limit;
   $("#gon").onchange = async e => { try{ await saveCfg({ on: e.target.checked }); }catch(x){ alert("บันทึกไม่สำเร็จ"); e.target.checked = !e.target.checked; } };
