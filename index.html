@@ -70,6 +70,24 @@ details summary{cursor:pointer;font-weight:600}
 .sch{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:14px}
 .cat{font-weight:700;margin:14px 0 2px}
 .tab.add{border-style:dashed;color:var(--pri)}
+.modebar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
+.seg{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--card)}
+.seg button{border:0;background:transparent;color:var(--ink);padding:8px 14px;font-size:14px;cursor:pointer}
+.seg button.on{background:var(--pri);color:var(--onpri);font-weight:600}
+.tip{border-left:6px solid var(--pri)}
+.tip ol{margin:6px 0 10px;padding-left:20px}
+.card>h2[data-open="0"]::after{content:"▸"}
+@media(max-width:600px){
+  h1{font-size:18px}
+  header .sub:not(#syncStat){display:none}
+  #panelBtn,#themeBtn,#setBtn{padding:9px 11px}
+  button.b{padding:10px 14px;font-size:15px}
+  .tab{padding:10px 16px;font-size:15px}
+  .stop{padding:12px}
+  .stop .nm{font-size:16px}
+  .sum b{font-size:20px}
+  .seg button{padding:9px 12px}
+}
 .card>h2:first-child{cursor:pointer;user-select:none;display:flex;justify-content:space-between;align-items:center}
 .card>h2:first-child::after{content:"▾";font-size:14px;opacity:.85}
 .card.collapsed>h2:first-child{margin-bottom:-14px;border-radius:13px}
@@ -136,7 +154,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-25-l";
+const APP_VER = "2026-11-26-n";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -192,6 +210,9 @@ try{
 }catch(e){}
 trip = cleanTrip(trip) || JSON.parse(JSON.stringify(DEFAULT_TRIP));
 let cur = 0, tableData = null, routeData = null, reqId = 0;
+// โหมดแสดงผล: แบบง่าย (เห็นเฉพาะที่ใช้บ่อย) / แบบเต็ม ผู้ร่วมทริปเริ่มที่แบบง่าย เจ้าของเริ่มที่แบบเต็ม
+let uiMode = ls.get("trip.ui.v1", null), extrasOpen = ls.get("trip.extras.v1", false), tipsSeen = ls.get("trip.tips.v1", false);
+const uiEff = () => uiMode || (isGuest() ? "simple" : "full");
 
 /* ---------- รถและการเติมพลังงาน ---------- */
 // ตัวอย่างค่าที่แสดงเป็น placeholder เท่านั้น (ไม่ได้ใส่ให้อัตโนมัติ)
@@ -510,7 +531,7 @@ async function update(){
 
 async function draw(day, picks, pts, seq, plan){
   curPts = pts;
-  const guest = isGuest();
+  const guest = isGuest(), simple = uiEff() === "simple";
   const T = tableData, direct = T.base, vias = day.vias || [];
   const mains = [day.start, ...vias, day.end];
   const est = routeData.est || T.est;
@@ -532,32 +553,49 @@ async function draw(day, picks, pts, seq, plan){
       <div style="flex:1">
         <div class="nm">${esc(s.name)} ${eb(s)}</div>
         <div class="meta">จาก${T.M > 2 ? " " + esc(mains[t.leg].name) : "จุดเริ่มต้น"} <b>${fmtKm(t.distance)}</b> · <b>${fmtDur(t.duration)}</b></div>
-        ${T.M > 2 ? `<div class="meta">อยู่ในช่วง ${esc(mains[t.leg].name)} → ${esc(mains[t.leg+1].name)}</div>` : ""}
+        ${T.M > 2 && !simple ? `<div class="meta">อยู่ในช่วง ${esc(mains[t.leg].name)} → ${esc(mains[t.leg+1].name)}</div>` : ""}
         ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}
         <div class="meta" onclick="event.stopPropagation()">แวะประมาณ
           <input class="stay" type="number" min="0" step="5" value="${stayOf(i)}" data-stay="${i}"> นาที
-          <button class="b" data-en="stop:${i}" style="padding:2px 8px;margin-left:6px" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>
-          <button class="b" data-del="${i}" style="padding:2px 8px;margin-left:4px" aria-label="ลบจุดแวะ">🗑</button></div>
+          ${simple ? "" : `<button class="b" data-en="stop:${i}" style="padding:2px 8px;margin-left:6px" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>
+          <button class="b" data-del="${i}" style="padding:2px 8px;margin-left:4px" aria-label="ลบจุดแวะ">🗑</button>`}</div>
       </div></div>`;
   }).join("");
 
   // ไทม์ไลน์
   // ถ้าไม่ได้ใส่เวลาออกเดินทาง จะแสดงเฉพาะระยะทาง/เวลาขับ ไม่แสดงเวลานาฬิกา
-  let clock = dep;
+  let clock = dep, finalArrive = "", cm = 0;      // cm = นาทีที่ผ่านไปนับจากออกเดินทาง (สะสมแบบทศนิยม แปลงเป็นเวลาทีเดียว ไม่ให้เศษปัดสะสม)
+  const adv = mins => { cm += mins; clock = dep ? addMin(dep, cm) : ""; };
   const tm = c => dep ? `<b>${c}</b> ` : "";
   let tl = `<li>${tm(clock)}${dep ? "" : "<b>"}ออกเดินทาง${dep ? "" : "</b>"} — ${esc(day.start.name)}</li>`;
+  // แทรกจุดเติม/ชาร์จที่ระบบแนะนำ (ตามระยะบนเส้นทาง) พร้อมเวลาเติม/ชาร์จต่อครั้ง เข้าไปในตารางเวลา
+  const posArr = seqPositions(routeData.legs), evs = plan.events.slice().sort((a, b) => a.alertAt - b.alertAt);
+  let evi = 0;
   seq.slice(1).forEach((x, k) => {
-    const leg = routeData.legs[k];
-    if (dep) clock = addMin(clock, leg.duration/60);
+    const leg = routeData.legs[k], segStart = posArr[k], segEnd = posArr[k+1];
+    let doneD = 0, doneT = 0;                        // ส่วนของช่วงนี้ที่ขับไปแล้วก่อนถึงจุดเติม
+    while (evi < evs.length && evs[evi].alertAt <= segEnd + 1){
+      const e0 = evs[evi++], frac = leg.distance ? Math.min(1, Math.max(0, (e0.alertAt - segStart) / leg.distance)) : 0;
+      const dD = Math.max(0, leg.distance * frac - doneD), dT = Math.max(0, leg.duration * frac - doneT), rest = Number(veh.rest) || 0;
+      adv(dT/60);
+      tl += `<li><div class="leg">🚗 ${fmtKm(dD)} · ${fmtDur(dT)}</div>${tm(clock)}<b>${isEV ? "⚡ ชาร์จแบต" : "⛽ เติมน้ำมัน"}</b> <span class="leg">(ที่ระบบแนะนำ ประมาณกม.ที่ ${(e0.alertAt/1000).toFixed(0)})</span>`;
+      if (rest){ adv(rest); tl += ` <span class="leg">(อยู่ ${rest} นาที${dep ? " → ออก " + clock : ""})</span>`; }
+      else tl += ` <span class="leg">(ยังไม่ได้ใส่เวลา${isEV ? "ชาร์จ" : "เติม"}ต่อครั้งในข้อมูลรถ)</span>`;
+      tl += `</li>`;
+      doneD += dD; doneT += dT;
+    }
+    const remD = Math.max(0, leg.distance - doneD), remT = Math.max(0, leg.duration - doneT);
+    adv(remT/60);
+    finalArrive = clock;
     const lbl = x.kind === "end" ? "ถึงปลายทาง" : x.kind === "lodging" ? "🛏 ถึงที่พัก" : x.kind === "via" ? "📍 ถึงจุดหมายหลัก" : "แวะ";
     const st = effStay(x), en = activeEnergy(x.p);
-    tl += `<li><div class="leg">🚗 ${fmtKm(leg.distance)} · ${fmtDur(leg.duration)}</div>${tm(clock)}<b>${lbl}</b> — ${esc(x.p.name)}${en ? " " + eb(x.p) : ""}`;
-    if (st){ if (dep) clock = addMin(clock, st); tl += ` <span class="leg">(อยู่ ${st} นาที${dep ? " → ออก " + clock : ""})</span>`; }
+    tl += `<li><div class="leg">🚗 ${fmtKm(remD)} · ${fmtDur(remT)}</div>${tm(clock)}<b>${lbl}</b> — ${esc(x.p.name)}${en ? " " + eb(x.p) : ""}`;
+    if (st){ adv(st); tl += ` <span class="leg">(อยู่ ${st} นาที${dep ? " → ออก " + clock : ""})</span>`; }
     tl += `</li>`;
   });
   if (!dep) tl += `<li class="leg" style="padding-bottom:0">ใส่ "เวลาออกเดินทาง" ด้านบน เพื่อดูเวลาถึงแต่ละจุด</li>`;
 
-  $("#panel").innerHTML = `
+  const html = `<!--C:hero-->
   <div class="card hero">
     <div class="route">${mains.map(m => esc(m.name)).join(' <span class="arrow">→</span> ')}</div>
     <div class="row">
@@ -568,6 +606,7 @@ async function draw(day, picks, pts, seq, plan){
     ${est ? `<div class="warn">⚠ ไม่ได้ต่ออินเทอร์เน็ต/คำนวณเส้นทางจริงไม่ได้ จึงแสดงค่าประมาณจากระยะเส้นตรง</div>` : ""}
   </div>
 
+  <!--C:sched-->
   <div class="card">
     <h2>📅 กำหนดการของวันนี้</h2>
     <div class="vgrid">
@@ -602,11 +641,15 @@ async function draw(day, picks, pts, seq, plan){
     </div>
   </div>
 
+  <!--C:stops-->
   <div class="card">
-    <h2>จุดแวะระหว่างทาง (เลือกได้มากกว่า 1 จุด)</h2>
+    <h2>${simple ? "🅿️ เลือกจุดแวะ" : "จุดแวะระหว่างทาง (เลือกได้มากกว่า 1 จุด)"}</h2>
+    ${simple ? `<p class="meta" style="margin:0 0 8px">ติ๊กจุดที่อยากแวะ เวลาและเส้นทางจะอัปเดตให้เอง</p>` : ""}
     ${stopsHtml || "<div class='meta'>ยังไม่มีจุดแวะ</div>"}
+    ${simple ? `<div class="row"><button class="b p" data-act="addstop">＋ เพิ่มจุดแวะ</button></div>` : ""}
   </div>
 
+  <!--C:sum-->
   <div class="card">
     <h2>สรุปแผนของวันนี้ (${picks.length} จุดแวะ)</h2>
     <div class="sum">
@@ -619,10 +662,11 @@ async function draw(day, picks, pts, seq, plan){
       <div><b>${plan.remain == null ? "-" : Math.round(plan.remain/1000) + " กม."}</b><span>ระยะวิ่งคงเหลือเมื่อถึงปลายทาง</span></div>
       <div style="grid-column:1/-1"><b>${fmtDur(totalMin*60)}</b><span>รวมทั้งวัน (ขับ + แวะ + ${isEV ? "ชาร์จ" : "เติมน้ำมัน"})</span></div>
     </div>
-    <div class="meta" style="margin-top:6px">* ไทม์ไลน์ด้านล่างยังไม่รวมเวลา${isEV ? "ชาร์จ" : "เติมน้ำมัน"}</div>
+    ${plan.events.length ? `<div class="meta" style="margin-top:6px">* ตารางเวลาด้านล่างรวมเวลา${isEV ? "ชาร์จ" : "เติมน้ำมัน"}ที่ระบบแนะนำแล้ว (ตำแหน่งเป็นค่าประมาณ)</div>` : ""}
     <ul class="tl">${tl}</ul>
   </div>
 
+  <!--C:veh-->
   <div class="card">
     <h2>🚗 รถและการ${isEV ? "ชาร์จ" : "เติมน้ำมัน"}</h2>
     <div class="vgrid">
@@ -644,6 +688,7 @@ async function draw(day, picks, pts, seq, plan){
     <div id="fuelBox"></div>
   </div>
 
+  <!--C:rec-->
   <div class="card">
     <h2>⭐ แนะนำสถานที่</h2>
     <label class="meta" style="display:block">ค้นหาบริเวณ<select class="f" id="recScope" style="margin-top:2px">
@@ -657,6 +702,7 @@ async function draw(day, picks, pts, seq, plan){
       ${guest ? "" : `· <a href="#" id="recSet">ตั้งค่า</a>`}</div>
   </div>
 
+  <!--C:share-->
   <div class="card">
     <h2>${guest ? "👨‍👩‍👧 แชร์ร่วมกัน" : "📤 แชร์และสำรองแผนทริป"}</h2>
     ${guest ? `<p class="meta" style="margin:0 0 4px">ทุกคนในทริปเห็นและแก้แผนเดียวกัน ส่งลิงก์เชิญให้คนอื่นได้ที่ปุ่มด้านล่าง</p>` : `
@@ -670,7 +716,8 @@ async function draw(day, picks, pts, seq, plan){
     <div class="row"><button class="b p" id="shSync" style="width:100%">👨‍👩‍👧 แชร์ร่วมกัน ${sync ? "🟢" : ""}</button></div>
   </div>
 
-  ${guest ? "" : `<div class="card">
+  ${guest ? "" : `<!--C:adv-->
+  <div class="card">
     <h2>✏️ แก้ไขข้อมูลทริป (ขั้นสูง)</h2>
     <details><summary>เปิดตัวแก้ไข JSON</summary>
       <p class="meta">แก้ชื่อ / พิกัด / เวลาแวะ / เพิ่มวัน เพิ่มจุดแวะ ได้ในรูปแบบ JSON แล้วกด "ใช้ข้อมูลนี้"</p>
@@ -683,7 +730,38 @@ async function draw(day, picks, pts, seq, plan){
     </details>
   </div>`}`;
 
+  // จัดหน้าตามโหมด: แบบเต็ม = ทุกการ์ดเหมือนเดิม · แบบง่าย = ภาพรวม + จุดแวะ + ตารางเวลา ส่วนที่เหลือรวมไว้ใต้ "เครื่องมือเพิ่มเติม"
+  const parts = {}; { const a = html.split(/<!--C:(\w+)-->/); for (let i = 1; i < a.length; i += 2) parts[a[i]] = a[i+1]; }
+  const modebar = `<div class="modebar"><div class="seg"><button data-ui="simple" class="${simple ? "on" : ""}">🙂 แบบง่าย</button><button data-ui="full" class="${simple ? "" : "on"}">🔧 แบบเต็ม</button></div><button class="b" id="helpBtn">❓ วิธีใช้</button></div>`;
+  let out;
+  if (!simple) out = modebar + ["hero", "sched", "stops", "sum", "veh", "rec", "share", "adv"].map(k => parts[k] || "").join("");
+  else {
+    const fuelLine = plan.unset ? "" : `<div class="meta" style="margin-top:8px">${isEV ? "⚡" : "⛽"} ${plan.events.length ? "ต้อง" + (isEV ? "ชาร์จ" : "เติมน้ำมัน") + " " + plan.events.length + " ครั้งระหว่างทาง (ดูใน เครื่องมือเพิ่มเติม)" : "ไม่ต้อง" + (isEV ? "ชาร์จ" : "เติมน้ำมัน") + "ระหว่างทาง"}</div>`;
+    const sumSimple = `<div class="card"><h2>📊 สรุปวันนี้</h2>
+      ${dep && finalArrive ? `<div class="route" style="font-size:18px;margin-bottom:8px">ออก ${esc(dep)} <span class="arrow">→</span> ถึง ${esc(finalArrive)}</div>` : `<div class="meta" style="margin-bottom:8px">ใส่เวลาออกเดินทางด้านบน เพื่อดูเวลาถึง</div>`}
+      <div class="sum">
+        <div><b>${fmtKm(routeData.distance + detourKm * 1000)}</b><span>ระยะทางรวม</span></div>
+        <div><b>${fmtDur(routeData.duration)}</b><span>เวลาขับรถ</span></div>
+        <div><b>${picks.length} จุด</b><span>จุดแวะที่เลือก</span></div>
+        <div><b>${fmtDur(totalMin*60)}</b><span>รวมทั้งวัน (ขับ+แวะ)</span></div>
+      </div>${fuelLine}</div>`;
+    const tlCard = `<div class="card"><h2>🕘 ตารางเวลาวันนี้</h2><ul class="tl" style="margin-top:0">${tl}</ul></div>`;
+    const tips = tipsSeen ? "" : `<div class="card tip"><b>วิธีใช้ใน 3 ขั้นตอน</b><ol><li>เลือกวันจากแท็บด้านบน</li><li>ติ๊กจุดแวะที่อยากแวะ</li><li>ดูเวลาและเส้นทางในตารางเวลา และบนแผนที่</li></ol><button class="b p" id="tipsOk">เข้าใจแล้ว</button></div>`;
+    out = modebar + tips + parts.hero + sumSimple + parts.stops + tlCard
+      + `<div class="card"><h2 id="extrasToggle" data-nofold data-open="${extrasOpen ? 1 : 0}" style="margin-bottom:-14px;border-radius:13px">🧰 เครื่องมือเพิ่มเติม <span style="font-weight:400;font-size:13px">แก้กำหนดการ · รถ/ชาร์จ · แนะนำสถานที่ · แชร์</span></h2></div>`
+      + `<div id="extras" ${extrasOpen ? "" : "hidden"}>` + ["sched", "veh", "rec", "share", "adv"].map(k => parts[k] || "").join("") + `</div>`;
+  }
+  $("#panel").innerHTML = out;
+
   // events
+  document.querySelectorAll("[data-ui]").forEach(b => b.onclick = () => { uiMode = b.dataset.ui; ls.set("trip.ui.v1", uiMode); update(); });
+  if ($("#helpBtn")) $("#helpBtn").onclick = openHelp;
+  if ($("#tipsOk")) $("#tipsOk").onclick = () => { tipsSeen = true; ls.set("trip.tips.v1", true); update(); };
+  if ($("#extrasToggle")) $("#extrasToggle").onclick = e => {
+    extrasOpen = !extrasOpen; ls.set("trip.extras.v1", extrasOpen);
+    $("#extras").hidden = !extrasOpen; e.currentTarget.dataset.open = extrasOpen ? 1 : 0;
+  };
+  // (ต่อด้านล่าง)
   document.querySelectorAll(".stop").forEach(el => el.onclick = e => toggle(+el.dataset.i));
   document.querySelectorAll("[data-stay]").forEach(inp => inp.onchange = () => { stays[cur+"_"+inp.dataset.stay] = +inp.value; ls.set("trip.stay.v1", stays); update(); });
   $("#dep").onchange = e => { departs[cur] = e.target.value; ls.set("trip.dep.v1", departs); update(); };
@@ -810,6 +888,23 @@ function act(a){
     day.vias = day.vias || []; day.vias.push(Object.assign(place(p), { stay: 0, note: "" })); saveTrip(); recMem = {}; load(); });
   else if (a === "addday") addDay();
   else if (a === "delday") delDay();
+}
+
+function openHelp(){
+  const m = $("#modal"); m.hidden = false;
+  m.innerHTML = `<div class="mbox"><h2>❓ วิธีใช้</h2>
+    <ol style="padding-left:20px;margin:6px 0">
+      <li>เลือก <b>วัน</b> จากแท็บด้านบน</li>
+      <li><b>ติ๊กจุดแวะ</b> ที่อยากแวะ เวลาและเส้นทางจะอัปเดตเอง</li>
+      <li>ดู <b>ตารางเวลา</b> และเส้นทางบนแผนที่ (ใส่เวลาออกเดินทางเพื่อดูเวลาถึง)</li>
+      <li>ต้องการเพิ่ม/แก้อย่างอื่น เปิด <b>🧰 เครื่องมือเพิ่มเติม</b></li>
+    </ol>
+    <div class="cat">ความหมายของหมุดบนแผนที่</div>
+    <div class="meta" style="line-height:1.9">▶ จุดเริ่มต้น · ⚑ ปลายทาง · ★ จุดหมายหลัก (ต้องไป) · 🛏 ที่พัก<br>เลข 1 2 3 = จุดแวะที่เลือก (เรียงตามลำดับ) · • จุดแวะที่ยังไม่เลือก<br>⚡⛽ = จุดเติมน้ำมัน/ชาร์จแบต</div>
+    <div class="cat">แบบง่าย / แบบเต็ม</div>
+    <div class="meta">แบบง่ายแสดงเฉพาะที่ใช้บ่อย ส่วนแบบเต็มมีทุกเครื่องมือ สลับได้ที่ปุ่มด้านบนของแผง</div>
+    <div class="row" style="margin-top:12px"><button class="b p" id="hx">ปิด</button></div></div>`;
+  $("#hx").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
 }
 
 /* ---------- ป้ายจุดเติม/ชาร์จของแต่ละจุด ---------- */
@@ -1287,8 +1382,14 @@ const docUrl = () => `${sync.db}/trips/${sync.id}.json`;
 function normDb(u){ u = String(u || "").trim().replace(/\/+$/, ""); return FB_RE.test(u) ? u : null; }
 function setStat(){
   const e = $("#syncStat"); if (!e) return;
-  e.textContent = sync ? (syncErr ? "⚠ แชร์ร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)"
-    : "🟢 แชร์ร่วมกัน: เปิดอยู่" + (lastSyncAt ? " · ซิงก์ล่าสุด " + new Date(lastSyncAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" }) : "")) : "";
+  if (!sync){ e.textContent = ""; return; }
+  if (tkeyNeeded){
+    e.innerHTML = '🔒 ทริปนี้ตั้งรหัสผ่านไว้ <a href="#" id="tkLink">ใส่รหัสผ่านเพื่อดูแผนล่าสุด</a>';
+    const a = $("#tkLink"); if (a) a.onclick = ev => { ev.preventDefault(); tkAsked = true; promptUnlock(); };
+    return;
+  }
+  e.textContent = syncErr ? "⚠ แชร์ร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)"
+    : "🟢 แชร์ร่วมกัน: เปิดอยู่" + (ctl && ctl.enc ? " · 🔐" : "") + (lastSyncAt ? " · ซิงก์ล่าสุด " + new Date(lastSyncAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" }) : "");
 }
 function inviteCode(){ return b64enc(JSON.stringify({ db: sync.db, id: sync.id })); }
 function inviteLink(){ return location.href.split("#")[0] + "#join=" + encodeURIComponent(inviteCode()); }
@@ -1314,16 +1415,22 @@ function schedulePush(key){
 async function pushNow(){
   if (!sync || !dirtyFields.size) return;
   const fields = [...dirtyFields]; dirtyFields.clear();
+  let enc = null;
   try{      // ถ้ามีคนอื่นแก้ไปแล้วระหว่างนี้ ดึงของเขามารวมก่อน (ส่วนที่เราแก้เองยังเป็นของเรา) แล้วค่อยส่ง
+    enc = await fetchJSON(`${sync.db}/trips/${sync.id}/ctl/enc.json`, 8000);
+    if (enc && (!tkey || tkey.s !== enc.s)){ fields.forEach(f => dirtyFields.add(f)); needTripKey(); if (ctl) ctl.enc = enc; return; }   // ยังไม่มีรหัสผ่านทริป ห้ามส่งข้อมูลแบบไม่เข้ารหัสเข้าไป
+    if (!enc && tkey) clearTkey();
     const remoteRev = await fetchJSON(`${sync.db}/trips/${sync.id}/rev.json`, 8000);
     if (typeof remoteRev === "number" && remoteRev !== lastRev){
       const doc = await fetchJSON(docUrl(), 10000);
-      if (doc && doc.by !== cid){ lastRev = doc.rev; applyRemote(doc, new Set(fields)); }
+      if (doc && doc.by !== cid){ lastRev = doc.rev; await applyRemote(doc, new Set(fields)); }
       else if (doc) lastRev = doc.rev;
     }
   }catch(e){}
   const val = { trip, sel, stays, departs, veh }, body = { rev: Math.max(Date.now(), lastRev + 1), by: cid };
-  fields.forEach(f => { body["plan/" + f] = val[f]; });
+  try{
+    for (const f of fields) body["plan/" + f] = tkey ? await aesEnc(tkey.key, JSON.stringify(val[f])) : val[f];
+  }catch(e){ fields.forEach(f => dirtyFields.add(f)); return; }
   try{
     const r = await fetch(docUrl(), { method:"PATCH", body: JSON.stringify(body) });
     if (!r.ok) throw new Error(r.status);
@@ -1341,8 +1448,9 @@ function applyWhenIdle(doc, n = 0){
   applyRemote(doc);
 }
 // keep = ชุดของส่วนที่เครื่องนี้เพิ่งแก้และยังไม่ได้ส่ง (ไม่เขียนทับด้วยของเก่าจากเซิร์ฟเวอร์)
-function applyRemote(doc, keep){
-  const p = (doc && doc.plan) || {}, k = f => !(keep && keep.has(f));
+async function applyRemote(doc, keep){
+  let p; try{ p = await plainPlan(doc); }catch(e){ if (e instanceof NeedKey){ needTripKey(); return false; } throw e; }
+  const k = f => !(keep && keep.has(f));
   const t = cleanTrip(p.trip && p.trip.days != null ? p.trip : Object.assign({}, p.trip, { days: [] })); if (!t) return;
   if (k("trip")) trip = t;
   if (k("sel")) sel = cleanSel(p.sel);
@@ -1352,6 +1460,7 @@ function applyRemote(doc, keep){
   syncApplying = true;
   try{ ls.set(LS.trip, trip); ls.set(LS.sel, sel); ls.set("trip.stay.v1", stays); ls.set("trip.dep.v1", departs); if (v) ls.set("trip.veh.v1", veh); } finally { syncApplying = false; }
   recMem = {}; cur = Math.max(0, Math.min(cur, trip.days.length - 1)); renderTabs(); load();
+  return true;
 }
 async function syncTick(){
   if (!sync || document.hidden || syncBusy) return;
@@ -1364,31 +1473,46 @@ async function syncTick(){
     }
     const c = await fetchJSON(`${sync.db}/trips/${sync.id}/ctl.json`, 8000);   // การตั้งค่า Google + ตัวนับของกลุ่ม (เล็กมาก)
     ctl = c || {}; checkGroupKey(); refreshGoogleUI();
+    if (ctl.enc && (!tkey || tkey.s !== ctl.enc.s)){
+      if (tkey && tkey.s !== ctl.enc.s) tkey = null;           // เจ้าของเปลี่ยนรหัสผ่าน
+      tkeyNeeded = true; if (!tkAsked){ tkAsked = true; promptUnlock(); }
+    } else if (ctl.enc) tkeyNeeded = false;
+    else { if (tkey) clearTkey(); tkeyNeeded = false; }
     syncErr = false;
   }catch(e){ syncErr = true; }
   syncBusy = false; setStat();
 }
-async function startSync(dbRaw){
+async function startSync(dbRaw, pw){
   const db = normDb(dbRaw);
   if (!db){ alert("ที่อยู่ฐานข้อมูลไม่ถูกต้อง ต้องขึ้นต้นด้วย https:// และลงท้ายด้วย firebasedatabase.app หรือ firebaseio.com"); return false; }
   const id = randId(24), rev = Date.now();
+  let e2 = null;
   try{
-    const r = await fetch(`${db}/trips/${id}.json`, { method:"PUT", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
+    if (pw){ if (String(pw).length < 6) throw new Error("รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร"); e2 = await makeEnc(pw); }
+    const body = { rev, by: cid, plan: await encPlan(e2 && e2.key) };
+    if (e2) body.ctl = { enc: e2.meta };
+    const r = await fetch(`${db}/trips/${id}.json`, { method:"PUT", body: JSON.stringify(body) });
     if (!r.ok) throw new Error(r.status);
   }catch(e){ alert("สร้างทริปร่วมไม่สำเร็จ ตรวจที่อยู่ฐานข้อมูลและ Rules (รหัสข้อผิดพลาด: " + (e.message || e) + ")"); return false; }
-  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setRole("owner"); setStat(); syncTick(); return true;
+  sync = { db, id }; lastRev = rev; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db); setRole("owner");
+  if (e2){ tkey = { id, s: e2.s, key: e2.key }; await storeTkey(); ctl = { enc: e2.meta }; }
+  setStat(); syncTick(); return true;
 }
 async function joinSync(db, id){
   try{
     const doc = await fetchJSON(`${db}/trips/${id}.json`, 10000);
     if (!doc || !doc.plan){ alert("ไม่พบทริปนี้ (ลิงก์เชิญอาจผิด หรือถูกลบแล้ว)"); return false; }
+    let enc = null; try{ enc = await fetchJSON(`${db}/trips/${id}/ctl/enc.json`, 10000); }catch(e){}
+    let key = null;
+    if (enc){ key = await askTripPassword(enc, "ทริปนี้ตั้งรหัสผ่านไว้"); if (!key) return false; }
     if (trip.days.length && !confirm("เข้าร่วมทริปร่วม? แผนในเครื่องนี้จะถูกแทนที่ด้วยแผนของกลุ่ม")) return false;
     sync = { db, id }; lastRev = doc.rev || 0; syncErr = false; ls.set("trip.sync.v1", sync); ls.set("trip.db.v1", db);
-    setRole("guest"); applyRemote(doc); setStat(); syncTick(); return true;
+    if (key){ tkey = { id, s: enc.s, key }; await storeTkey(); ctl = { enc }; } else clearTkey();
+    setRole("guest"); await applyRemote(doc); setStat(); syncTick(); return true;
   }catch(e){ alert("เข้าร่วมไม่สำเร็จ ตรวจอินเทอร์เน็ตและลิงก์เชิญ"); return false; }
 }
 function leaveSync(){
-  sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); ctl = null;
+  sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); ctl = null; clearTkey();
   if (gsrc === "group") dropGroupKey();           // key ที่ได้มาจากกลุ่ม ต้องออกจากเครื่องเมื่อออกจากกลุ่ม
   setRole("owner"); setStat(); if (trip.days.length) update();
 }
@@ -1442,8 +1566,26 @@ function openSync(){
       </div>
       ${hosted ? "" : `<p class="meta">ตอนนี้เปิดจากไฟล์ในเครื่อง จึงสร้างลิงก์ไม่ได้ ส่ง "รหัสเชิญ" ให้ผู้ร่วมทริปไปวางในช่อง "เข้าร่วม" ได้</p>`}
       <p class="meta">ผู้ที่มีลิงก์/รหัสแก้ไขหรือลบแผนได้ทุกอย่าง ส่งให้เฉพาะคนในครอบครัว</p>
+      ${isGuest() ? (ctl && ctl.enc ? `<p class="meta">🔐 ทริปนี้ตั้งรหัสผ่านไว้ (ข้อมูลเข้ารหัส)</p>` : "") : `
+      <div class="cat">🔐 รหัสผ่านทริป</div>
+      <p class="meta" id="tpst" style="margin:4px 0">${ctl && ctl.enc ? "🟢 ตั้งไว้ — ข้อมูลทริปใน Firebase เข้ารหัส คนที่มีแค่ลิงก์อ่านแผนไม่ได้" : "ยังไม่ได้ตั้ง — ข้อมูลทริปไม่ได้เข้ารหัส (ใครมีลิงก์ก็อ่านได้)"}</p>
+      <input class="f" id="tppw" type="password" placeholder="${ctl && ctl.enc ? "รหัสผ่านใหม่" : "ตั้งรหัสผ่าน"} (อย่างน้อย 6 ตัวอักษร)" autocomplete="new-password">
+      <input class="f" id="tppw2" type="password" placeholder="พิมพ์รหัสผ่านอีกครั้ง" autocomplete="new-password" style="margin-top:6px">
+      <div class="row"><button class="b p" id="tpset">${ctl && ctl.enc ? "เปลี่ยนรหัสผ่าน" : "ตั้งรหัสผ่าน"}</button>${ctl && ctl.enc ? `<button class="b" id="tpoff">ยกเลิกรหัสผ่าน</button>` : ""}</div>
+      <p class="meta">ลืมรหัสผ่านแล้วกู้ข้อมูลที่ซิงก์ไม่ได้ (แผนในเครื่องคุณยังอยู่ ควรดาวน์โหลดไฟล์สำรองไว้) รหัสผ่านไม่ได้อยู่ในลิงก์เชิญ ต้องบอกผู้ร่วมทริปแยกต่างหาก</p>`}
       <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ ${isGuest() ? "ออกจากทริปร่วม" : "เลิกซิงก์"} (เก็บแผนไว้ในเครื่อง)</button><button class="b" id="sx">ปิด</button></div></div>`;
-    if ($("#syShare")) $("#syShare").onclick = () => openLinkBox("ลิงก์เชิญเข้าร่วมทริป", inviteLink(), "ส่งลิงก์นี้ให้ผู้ร่วมทริป เปิดลิงก์แล้วตอบตกลงเพื่อเข้าร่วม (ต้องเป็นลิงก์นี้ ไม่ใช่ลิงก์ภาพของแผน)");
+    if ($("#syShare")) $("#syShare").onclick = () => openLinkBox("ลิงก์เชิญเข้าร่วมทริป", inviteLink(), "ส่งลิงก์นี้ให้ผู้ร่วมทริป เปิดลิงก์แล้วตอบตกลงเพื่อเข้าร่วม (ต้องเป็นลิงก์นี้ ไม่ใช่ลิงก์ภาพของแผน)" + (ctl && ctl.enc ? " ทริปนี้ตั้งรหัสผ่านไว้ ผู้รับต้องใช้รหัสผ่านที่คุณบอกแยกต่างหาก" : ""));
+    if ($("#tpset")) $("#tpset").onclick = async () => {
+      const a = $("#tppw").value, b2 = $("#tppw2").value;
+      if (a !== b2){ alert("รหัสผ่านสองช่องไม่ตรงกัน"); return; }
+      const btn = $("#tpset"); btn.disabled = true; btn.textContent = "กำลังเข้ารหัส…";
+      try{ await setTripPassword(a); alert("ตั้งรหัสผ่านทริปแล้ว ผู้ร่วมทริปจะถูกขอรหัสผ่านเมื่อเปิดเว็บครั้งถัดไป อย่าลืมบอกรหัสผ่านเขา"); openSync(); }
+      catch(x){ alert("ตั้งรหัสผ่านไม่สำเร็จ: " + (x.message || x)); btn.disabled = false; btn.textContent = "ตั้งรหัสผ่าน"; }
+    };
+    if ($("#tpoff")) $("#tpoff").onclick = async () => {
+      if (!confirm("ยกเลิกรหัสผ่านทริป? ข้อมูลทริปใน Firebase จะไม่เข้ารหัส ใครมีลิงก์ก็อ่านได้")) return;
+      try{ await removeTripPassword(); openSync(); }catch(x){ alert("ไม่สำเร็จ: " + (x.message || x)); }
+    };
     $("#syCode").onclick = () => openLinkBox("รหัสเชิญเข้าร่วมทริป", inviteCode(), "ใช้เมื่อส่งลิงก์ไม่ได้ ให้ผู้ร่วมทริปวางรหัสนี้ในช่อง \"เข้าร่วมทริปที่มีคนเชิญ\" (ปุ่ม แชร์ร่วมกัน)");
     $("#syOff").onclick = () => { if (confirm("เลิกซิงก์? แผนที่เห็นตอนนี้จะอยู่ในเครื่องนี้ต่อ แต่จะไม่อัปเดตกับกลุ่มอีก")){ leaveSync(); closeModal(); } };
   } else {
@@ -1451,6 +1593,10 @@ function openSync(){
       <p class="meta">ให้ทุกคนในทริปเห็นและแก้แผนเดียวกัน ต้องมีฐานข้อมูลกลางฟรีของ Firebase (ตั้งครั้งเดียว ใช้เวลาประมาณ 5 นาที)</p>
       <div class="cat" style="margin-top:6px">🅰 เริ่มทริปร่วมใหม่ (คนตั้งค่า)</div>
       <input class="f" id="sdb" placeholder="ที่อยู่ Realtime Database เช่น https://ชื่อ-default-rtdb.asia-southeast1.firebasedatabase.app" value="${esc(ls.get("trip.db.v1", ""))}" autocomplete="off" style="margin-top:6px">
+      <div class="cat" style="margin-top:8px">🔐 รหัสผ่านทริป <span class="meta">(ไม่บังคับ แต่แนะนำ)</span></div>
+      <p class="meta" style="margin:2px 0 4px">ถ้าตั้ง ข้อมูลทริปจะเข้ารหัส คนที่มีแค่ลิงก์อ่านแผนไม่ได้ ต้องใส่รหัสผ่านก่อน ลืมรหัสผ่านแล้วกู้ข้อมูลที่ซิงก์ไม่ได้</p>
+      <input class="f" id="sdpw" type="password" placeholder="รหัสผ่านทริป (อย่างน้อย 6 ตัวอักษร) หรือเว้นว่าง" autocomplete="new-password">
+      <input class="f" id="sdpw2" type="password" placeholder="พิมพ์รหัสผ่านอีกครั้ง" autocomplete="new-password" style="margin-top:6px">
       <div class="row"><button class="b p" id="sgo">สร้างทริปร่วมจากแผนนี้</button></div>
       <details style="margin-top:8px"><summary>วิธีตั้ง Firebase (ทำครั้งเดียว)</summary>
         <ol class="meta" style="padding-left:18px;margin:6px 0">
@@ -1468,8 +1614,10 @@ function openSync(){
     $("#srcopy").onclick = () => copyText(FB_RULES, "คัดลอก Rules แล้ว");
     $("#sgo").onclick = async () => {
       if (!trip.days.length && !confirm("ตอนนี้ยังไม่มีแผน สร้างทริปร่วมเปล่าเลยไหม?")) return;
+      const pw = $("#sdpw").value;
+      if (pw !== $("#sdpw2").value){ alert("รหัสผ่านสองช่องไม่ตรงกัน"); return; }
       const b = $("#sgo"); b.disabled = true; b.textContent = "กำลังสร้าง…";
-      if (await startSync($("#sdb").value)){ openSync(); } else { b.disabled = false; b.textContent = "สร้างทริปร่วมจากแผนนี้"; }
+      if (await startSync($("#sdb").value, pw)){ openSync(); } else { b.disabled = false; b.textContent = "สร้างทริปร่วมจากแผนนี้"; }
     };
     $("#sjoin").onclick = async () => {
       const inv = parseInvite($("#sinv").value); if (!inv){ alert("ลิงก์หรือรหัสเชิญไม่ถูกต้อง"); return; }
@@ -1482,9 +1630,9 @@ function openSync(){
 function initSync(){
   globalThis.__syncHook = schedulePush;
   setStat();
+  loadTkey().then(() => syncTick());          // โหลดรหัสผ่านทริปที่จำไว้ก่อน แล้วค่อยซิงก์ครั้งแรก
   setInterval(syncTick, 5000);
   document.addEventListener("visibilitychange", () => { if (!document.hidden) syncTick(); });
-  syncTick();
 }
 
 /* ---------- ใช้ Google ร่วมกันทั้งกลุ่ม: เข้ารหัส key / ตัวนับการใช้งาน / สวิตช์เปิด-ปิด ---------- */
@@ -1543,7 +1691,8 @@ function checkGroupKey(){        // เจ้าของเลิกแชร�
 function dropGroupKey(){
   gkey = ""; ls.set(GKEY, ""); gsrc = ""; ls.set("trip.gsrc.v1", ""); ls.set("trip.gid.v1", ""); recMem = {}; refreshGoogleUI();
 }
-const b64u = u => btoa(String.fromCharCode(...new Uint8Array(u)));
+function bytesToB64(u8){ let s = ""; for (let i = 0; i < u8.length; i += 0x8000) s += String.fromCharCode.apply(null, u8.subarray(i, i + 0x8000)); return btoa(s); }
+const b64u = u => bytesToB64(new Uint8Array(u));
 const unb64 = b => Uint8Array.from(atob(b), c => c.charCodeAt(0));
 async function deriveKey(pw, salt){
   const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
@@ -1606,6 +1755,98 @@ function openUnlock(){
   };
   $("#ugo").onclick = go; $("#upw").onkeydown = e => { if (e.key === "Enter") go(); };
   $("#ux").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
+}
+
+/* ---------- รหัสผ่านทริป: เข้ารหัสข้อมูลทริปก่อนเก็บใน Firebase (AES-256-GCM) ---------- */
+class NeedKey extends Error {}
+let tkey = null, tkeyNeeded = false, tkAsked = false;       // tkey = { id, s, key } กุญแจถอดรหัสของเครื่องนี้
+const isEnc = o => !!o && typeof o === "object" && o.e === 1 && typeof o.c === "string";
+async function deriveDataKey(pw, salt){
+  const km = await crypto.subtle.importKey("raw", new TextEncoder().encode(pw), "PBKDF2", false, ["deriveKey"]);
+  return crypto.subtle.deriveKey({ name:"PBKDF2", salt, iterations:200000, hash:"SHA-256" }, km, { name:"AES-GCM", length:256 }, true, ["encrypt", "decrypt"]);
+}
+async function aesEnc(key, str){
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const ct = await crypto.subtle.encrypt({ name:"AES-GCM", iv }, key, new TextEncoder().encode(str));
+  return { e:1, i:b64u(iv), c:b64u(ct) };
+}
+async function aesDec(key, o){ return new TextDecoder().decode(await crypto.subtle.decrypt({ name:"AES-GCM", iv:unb64(o.i) }, key, unb64(o.c))); }
+async function storeTkey(){
+  if (!tkey) return;
+  const raw = await crypto.subtle.exportKey("raw", tkey.key);
+  ls.set("trip.tkey.v1", { id: tkey.id, s: tkey.s, k: bytesToB64(new Uint8Array(raw)) });
+}
+async function loadTkey(){
+  const o = ls.get("trip.tkey.v1", null); if (!o || !sync || o.id !== sync.id) return;
+  try{ tkey = { id:o.id, s:o.s, key: await crypto.subtle.importKey("raw", unb64(o.k), "AES-GCM", true, ["encrypt", "decrypt"]) }; }catch(e){}
+}
+function clearTkey(){ tkey = null; tkeyNeeded = false; ls.set("trip.tkey.v1", null); }
+async function makeEnc(pw){
+  if (!(window.crypto && crypto.subtle)) throw new Error("เบราว์เซอร์นี้ไม่รองรับการเข้ารหัส (ต้องเปิดผ่านเว็บ https)");
+  const salt = crypto.getRandomValues(new Uint8Array(16)), key = await deriveDataKey(pw, salt), s = bytesToB64(salt);
+  return { key, s, meta: { v:1, s, chk: await aesEnc(key, "ok") } };
+}
+async function encPlan(key){
+  const out = {}, val = { trip, sel, stays, departs, veh };
+  for (const f of Object.keys(val)) out[f] = key ? await aesEnc(key, JSON.stringify(val[f])) : val[f];
+  return out;
+}
+async function plainPlan(doc){
+  const p = (doc && doc.plan) || {}, out = {};
+  for (const f of ["trip", "sel", "stays", "departs", "veh"]){
+    const v = p[f];
+    if (isEnc(v)){
+      if (!tkey) throw new NeedKey();
+      try{ out[f] = JSON.parse(await aesDec(tkey.key, v)); }catch(e){ throw new NeedKey(); }
+    } else out[f] = v;
+  }
+  return out;
+}
+async function tryTripKey(enc, pw){
+  try{ const key = await deriveDataKey(pw, unb64(enc.s)); return (await aesDec(key, enc.chk)) === "ok" ? key : null; }catch(e){ return null; }
+}
+function askTripPassword(enc, title){
+  return new Promise(res => {
+    const m = $("#modal"); m.hidden = false;
+    m.innerHTML = `<div class="mbox"><h2>🔒 ${esc(title)}</h2>
+      <p class="meta">ข้อมูลทริปถูกเข้ารหัส ใส่รหัสผ่านที่เจ้าของทริปบอก (กรอกครั้งเดียว เครื่องนี้จะจำไว้)</p>
+      <input class="f" id="tppw" type="password" placeholder="รหัสผ่านทริป" autocomplete="off">
+      <div class="warn" id="tperr" style="margin-top:6px"></div>
+      <div class="row"><button class="b p" id="tpgo">ปลดล็อก</button><button class="b" id="tpx">ไว้ทีหลัง</button></div></div>`;
+    $("#tppw").focus();
+    const go = async () => {
+      const b = $("#tpgo"); b.disabled = true; b.textContent = "กำลังตรวจ…"; $("#tperr").textContent = "";
+      const key = await tryTripKey(enc, $("#tppw").value);
+      if (key){ closeModal(); res(key); } else { $("#tperr").textContent = "รหัสผ่านไม่ถูกต้อง"; b.disabled = false; b.textContent = "ปลดล็อก"; }
+    };
+    $("#tpgo").onclick = go; $("#tppw").onkeydown = e => { if (e.key === "Enter") go(); };
+    $("#tpx").onclick = () => { closeModal(); res(null); };
+    m.onclick = e => { if (e.target === m){ closeModal(); res(null); } };
+  });
+}
+function needTripKey(){ tkeyNeeded = true; setStat(); }
+async function promptUnlock(){
+  const enc = ctl && ctl.enc; if (!enc || !sync) return;
+  const key = await askTripPassword(enc, "ทริปนี้ตั้งรหัสผ่านไว้");
+  if (key){ tkey = { id: sync.id, s: enc.s, key }; await storeTkey(); tkeyNeeded = false; setStat(); syncTick(); }
+}
+async function setTripPassword(pw){
+  if (!sync) throw new Error("ต้องเปิด \"แชร์ร่วมกัน\" ก่อน");
+  if (String(pw).length < 6) throw new Error("รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร");
+  const e = await makeEnc(pw), plan = await encPlan(e.key), rev = Math.max(Date.now(), lastRev + 1);
+  const body = { rev, by: cid, "ctl/enc": e.meta }; Object.keys(plan).forEach(f => { body["plan/" + f] = plan[f]; });
+  const r = await fetch(docUrl(), { method:"PATCH", body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status);
+  tkey = { id: sync.id, s: e.s, key: e.key }; await storeTkey(); tkeyNeeded = false;
+  ctl = ctl || {}; ctl.enc = e.meta; lastRev = rev; lastSyncAt = Date.now(); setStat();
+}
+async function removeTripPassword(){
+  if (!sync) return;
+  const plan = await encPlan(null), rev = Math.max(Date.now(), lastRev + 1);
+  const body = { rev, by: cid, "ctl/enc": null }; Object.keys(plan).forEach(f => { body["plan/" + f] = plan[f]; });
+  const r = await fetch(docUrl(), { method:"PATCH", body: JSON.stringify(body) });
+  if (!r.ok) throw new Error(r.status);
+  clearTkey(); if (ctl) delete ctl.enc; lastRev = rev; lastSyncAt = Date.now(); setStat();
 }
 
 /* ---------- เมนูตั้งค่า ---------- */
@@ -1854,7 +2095,7 @@ let folds = ls.get("trip.fold.v1", {});
 const foldKey = h => h.textContent.replace(/\d+/g, "#").trim();
 function applyFolds(){ document.querySelectorAll("#panel .card>h2:first-child").forEach(h => h.parentElement.classList.toggle("collapsed", !!folds[foldKey(h)])); }
 $("#panel").addEventListener("click", e => {
-  const h = e.target.closest(".card>h2:first-child"); if (!h) return;
+  const h = e.target.closest(".card>h2:first-child"); if (!h || h.hasAttribute("data-nofold")) return;
   const k = foldKey(h); folds[k] = !folds[k]; ls.set("trip.fold.v1", folds); h.parentElement.classList.toggle("collapsed", !!folds[k]);
 });
 $("#ver").textContent = APP_VER;
