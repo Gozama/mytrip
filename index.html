@@ -136,7 +136,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-25-j";
+const APP_VER = "2026-11-25-k";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -146,7 +146,7 @@ const ls = {
   get(k, d){ try{ const v = localStorage.getItem(k); return v ? JSON.parse(v) : d; }catch(e){ return d; } },
   set(k, v){
     try{ localStorage.setItem(k, JSON.stringify(v)); }catch(e){}
-    if (SYNC_KEYS.has(k) && globalThis.__syncHook) globalThis.__syncHook();   // ส่งการเปลี่ยนแปลงไปให้กลุ่ม (ถ้าเปิดซิงก์)
+    if (SYNC_KEYS.has(k) && globalThis.__syncHook) globalThis.__syncHook(k);   // ส่งการเปลี่ยนแปลงไปให้กลุ่ม (ถ้าเปิดซิงก์)
   }
 };
 
@@ -1289,7 +1289,8 @@ const docUrl = () => `${sync.db}/trips/${sync.id}.json`;
 function normDb(u){ u = String(u || "").trim().replace(/\/+$/, ""); return FB_RE.test(u) ? u : null; }
 function setStat(){
   const e = $("#syncStat"); if (!e) return;
-  e.textContent = sync ? (syncErr ? "⚠ แชร์ร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)" : "🟢 แชร์ร่วมกัน: เปิดอยู่") : "";
+  e.textContent = sync ? (syncErr ? "⚠ แชร์ร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)"
+    : "🟢 แชร์ร่วมกัน: เปิดอยู่" + (lastSyncAt ? " · ซิงก์ล่าสุด " + new Date(lastSyncAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" }) : "")) : "";
 }
 function inviteCode(){ return b64enc(JSON.stringify({ db: sync.db, id: sync.id })); }
 function inviteLink(){ return location.href.split("#")[0] + "#join=" + encodeURIComponent(inviteCode()); }
@@ -1302,30 +1303,54 @@ function parseInvite(t){
   }catch(e){}
   return null;
 }
-function schedulePush(){ if (!sync || syncApplying) return; clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 800); }
+// ส่งเฉพาะส่วนที่เปลี่ยน (แผน / จุดแวะที่เลือก / เวลาแวะ / เวลาออกเดินทาง / ข้อมูลรถ) ไม่เขียนทับส่วนอื่นที่คนอื่นเพิ่งแก้
+const PLAN_FIELD = { "trip.data.v1":"trip", "trip.sel.v1":"sel", "trip.stay.v1":"stays", "trip.dep.v1":"departs", "trip.veh.v1":"veh" };
+const dirtyFields = new Set();
+let lastSyncAt = 0, lastTypeAt = 0;
+document.addEventListener("input", () => { lastTypeAt = Date.now(); }, true);
+function schedulePush(key){
+  if (!sync || syncApplying) return;
+  if (PLAN_FIELD[key]) dirtyFields.add(PLAN_FIELD[key]);
+  clearTimeout(pushTimer); pushTimer = setTimeout(pushNow, 800);
+}
 async function pushNow(){
-  if (!sync) return;
-  const rev = Math.max(Date.now(), lastRev + 1);
+  if (!sync || !dirtyFields.size) return;
+  const fields = [...dirtyFields]; dirtyFields.clear();
+  try{      // ถ้ามีคนอื่นแก้ไปแล้วระหว่างนี้ ดึงของเขามารวมก่อน (ส่วนที่เราแก้เองยังเป็นของเรา) แล้วค่อยส่ง
+    const remoteRev = await fetchJSON(`${sync.db}/trips/${sync.id}/rev.json`, 8000);
+    if (typeof remoteRev === "number" && remoteRev !== lastRev){
+      const doc = await fetchJSON(docUrl(), 10000);
+      if (doc && doc.by !== cid){ lastRev = doc.rev; applyRemote(doc, new Set(fields)); }
+      else if (doc) lastRev = doc.rev;
+    }
+  }catch(e){}
+  const val = { trip, sel, stays, departs, veh }, body = { rev: Math.max(Date.now(), lastRev + 1), by: cid };
+  fields.forEach(f => { body["plan/" + f] = val[f]; });
   try{
-    const r = await fetch(docUrl(), { method:"PATCH", body: JSON.stringify({ rev, by: cid, plan: { trip, sel, stays, departs, veh } }) });
+    const r = await fetch(docUrl(), { method:"PATCH", body: JSON.stringify(body) });
     if (!r.ok) throw new Error(r.status);
-    lastRev = rev; syncErr = false;
-  }catch(e){ syncErr = true; setTimeout(schedulePush, 8000); }
+    lastRev = body.rev; lastSyncAt = Date.now(); syncErr = false;
+  }catch(e){ fields.forEach(f => dirtyFields.add(f)); syncErr = true; setTimeout(() => schedulePush(), 8000); }
   setStat();
 }
+// รอจนผู้ใช้หยุดพิมพ์/ปิดหน้าต่างก่อนอัปเดตหน้าจอ (ไม่รอเพราะแค่เคอร์เซอร์ค้างอยู่ในช่องกรอก)
 function busyUI(){
   const a = document.activeElement;
-  return !$("#modal").hidden || !!pickMode || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest("#panel"));
+  return !$("#modal").hidden || !!pickMode || (a && /^(INPUT|TEXTAREA|SELECT)$/.test(a.tagName) && a.closest("#panel") && Date.now() - lastTypeAt < 4000);
 }
 function applyWhenIdle(doc, n = 0){
-  if (busyUI() && n < 20){ setTimeout(() => applyWhenIdle(doc, n + 1), 1500); return; }
+  if (busyUI() && n < 10){ setTimeout(() => applyWhenIdle(doc, n + 1), 1500); return; }
   applyRemote(doc);
 }
-function applyRemote(doc){
-  const p = (doc && doc.plan) || {};
+// keep = ชุดของส่วนที่เครื่องนี้เพิ่งแก้และยังไม่ได้ส่ง (ไม่เขียนทับด้วยของเก่าจากเซิร์ฟเวอร์)
+function applyRemote(doc, keep){
+  const p = (doc && doc.plan) || {}, k = f => !(keep && keep.has(f));
   const t = cleanTrip(p.trip && p.trip.days != null ? p.trip : Object.assign({}, p.trip, { days: [] })); if (!t) return;
-  trip = t; sel = cleanSel(p.sel); stays = cleanStays(p.stays); departs = cleanDeps(p.departs);
-  const v = cleanVeh(p.veh); if (v) veh = v;      // ข้อมูลรถเป็นของทั้งกลุ่ม ให้ตรงกันทุกเครื่อง
+  if (k("trip")) trip = t;
+  if (k("sel")) sel = cleanSel(p.sel);
+  if (k("stays")) stays = cleanStays(p.stays);
+  if (k("departs")) departs = cleanDeps(p.departs);
+  const v = k("veh") ? cleanVeh(p.veh) : null; if (v) veh = v;      // ข้อมูลรถเป็นของทั้งกลุ่ม ให้ตรงกันทุกเครื่อง
   syncApplying = true;
   try{ ls.set(LS.trip, trip); ls.set(LS.sel, sel); ls.set("trip.stay.v1", stays); ls.set("trip.dep.v1", departs); if (v) ls.set("trip.veh.v1", veh); } finally { syncApplying = false; }
   recMem = {}; cur = Math.max(0, Math.min(cur, trip.days.length - 1)); renderTabs(); load();
@@ -1335,9 +1360,9 @@ async function syncTick(){
   syncBusy = true;
   try{
     const rev = await fetchJSON(`${sync.db}/trips/${sync.id}/rev.json`, 8000);   // ดึงแค่ตัวเลขเวอร์ชัน (เล็กมาก)
-    if (typeof rev === "number" && rev > lastRev){
+    if (typeof rev === "number" && rev !== lastRev){          // เปรียบเทียบว่า "เปลี่ยน" ไม่ใช่ "ใหม่กว่า" เพราะนาฬิกาแต่ละเครื่องไม่ตรงกัน
       const doc = await fetchJSON(docUrl(), 10000);
-      if (doc && doc.rev > lastRev){ lastRev = doc.rev; if (doc.by !== cid) applyWhenIdle(doc); }
+      if (doc && doc.rev !== lastRev){ lastRev = doc.rev; if (doc.by !== cid){ lastSyncAt = Date.now(); applyWhenIdle(doc); } }
     }
     const c = await fetchJSON(`${sync.db}/trips/${sync.id}/ctl.json`, 8000);   // การตั้งค่า Google + ตัวนับของกลุ่ม (เล็กมาก)
     ctl = c || {}; checkGroupKey(); refreshGoogleUI();
