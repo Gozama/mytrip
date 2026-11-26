@@ -154,7 +154,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-26-p";
+const APP_VER = "2026-11-26-q";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -1199,7 +1199,7 @@ async function recAllGoogle(k, path, day, prog){
   for (let i = 0; i < provs.length; i++){
     const pv = provs[i]; if (prog) prog(null, null, `กำลังค้นหาใน ${pv.full} (${i+1}/${provs.length})…`);
     const part = (await gSearch(`${c.g} ${pv.full}`, pv.at, 50000, 4)).map(x => gItem(x, path, pv.name)).filter(Boolean);
-    items.push(...finalize(part, "all", k).slice(0, topPerProvince));
+    const top = finalize(part, "all", k).slice(0, topPerProvince); top.forEach(it => { it.pr = i; }); items.push(...top);
   }
   return finalize(items, "all", k);
 }
@@ -1256,7 +1256,7 @@ async function recAllOSM(k, path, day, prog){
       els = slimEls(els); cache[key] = els; saveCache();
     }
     const part = els.map(e => osmItem(e, c, path, pv.name)).filter(i => i.name);
-    items.push(...finalize(part, "all", k).slice(0, topPerProvince));
+    const top = finalize(part, "all", k).slice(0, topPerProvince); top.forEach(it => { it.pr = i; }); items.push(...top);
   }
   return finalize(items, "all", k);
 }
@@ -1345,11 +1345,21 @@ function showRec(){
   } else if (slot.error){
     html += `<div class="warn" style="margin-top:10px">${esc(slot.error)} <a href="#" id="recRetry">ลองใหม่</a></div>`;
   } else {
-    const pages = Math.max(1, Math.ceil(slot.items.length / REC_PAGE));
+    // โหมดแสดงทั้งหมด: ปุ่มเลือกจังหวัด (เรียงตามลำดับที่ขับผ่าน) กดแล้วแสดงเฉพาะจังหวัดนั้น
+    const provMap = new Map();
+    slot.items.forEach(x => { if (x.prov){ const o = provMap.get(x.prov) || { name:x.prov, n:0, ord: x.pr != null ? x.pr : 1e6 + x.along }; o.n++; provMap.set(x.prov, o); } });
+    const provList = [...provMap.values()].sort((a, b) => a.ord - b.ord);
+    if (effScope(recCat) !== "all" || provList.length < 2) slot.provSel = null;
+    if (slot.provSel && !provMap.has(slot.provSel)) slot.provSel = null;
+    if (effScope(recCat) === "all" && provList.length >= 2)
+      html += `<div class="meta" style="margin-top:8px">📍 จังหวัดที่ขับผ่าน (กดเพื่อดูเฉพาะจังหวัด)</div><div class="chips" style="margin-top:4px">`
+        + `<button class="chip ${slot.provSel ? "" : "on"}" data-prov="">ทั้งหมด (${slot.items.length})</button>`
+        + provList.map(o => `<button class="chip ${slot.provSel === o.name ? "on" : ""}" data-prov="${esc(o.name)}">จ.${esc(o.name)} (${o.n})</button>`).join("") + `</div>`;
+    else if (effScope(recCat) === "all" && provList.length) html += `<div class="meta" style="margin-top:8px">📍 จังหวัดที่ขับผ่าน: จ.${esc(provList[0].name)}</div>`;
+    const view = slot.provSel ? slot.items.filter(x => x.prov === slot.provSel) : slot.items;
+    const pages = Math.max(1, Math.ceil(view.length / REC_PAGE));
     slot.page = Math.min(Math.max(0, slot.page || 0), pages - 1);
-    const base = slot.page * REC_PAGE, list = slot.items.slice(base, base + REC_PAGE);
-    const provs = [...new Set(slot.items.map(x => x.prov).filter(Boolean))];
-    if (effScope(recCat) === "all" && provs.length) html += `<div class="meta" style="margin-top:8px">📍 จังหวัดที่ขับผ่าน: ${provs.map(x => esc(x)).join(" · ")}</div>`;
+    const base = slot.page * REC_PAGE, list = view.slice(base, base + REC_PAGE);
     if (slot.note) html += `<div class="warn" style="margin-top:8px">${esc(slot.note)}</div>`;
     if (slot.savedAt) html += `<div class="meta" style="margin-top:8px">🕘 ผลที่จำไว้ในเครื่อง (ค้นหาเมื่อ ${new Date(slot.savedAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" })}) กด "ค้นหาใหม่" เพื่ออัปเดต</div>`;
     html += slot.source === "google"
@@ -1357,12 +1367,12 @@ function showRec(){
       : `<div class="meta" style="margin-top:8px">⚠ ข้อมูลจาก OpenStreetMap <b>ไม่มีคะแนนรีวิว</b> — เรียงตามความโดดเด่น/ความครบของข้อมูล รูปมีเฉพาะสถานที่ที่มีรูปใน Wikipedia/Wikimedia กด "ดูรีวิว" เพื่อดูคะแนนใน Google Maps</div>`;
     if (!list.length) html += `<div class="meta" style="margin-top:8px">ไม่พบข้อมูลในบริเวณนี้ ลองเปลี่ยน "ค้นหาบริเวณ"</div>`;
     list.forEach((p, ii) => {
-      const i = base + ii, added = day.stops.some(s => hav(s, p) < 60);
+      const i = slot.items.indexOf(p), rank = base + ii + 1, added = day.stops.some(s => hav(s, p) < 60);
       const link = p.uri || `https://www.google.com/maps/search/${encodeURIComponent(p.name)}/@${p.lat},${p.lng},16z`;
       html += `<div class="rc">
         <div class="ph" data-i="${i}"><span>${c.ico}</span></div>
         <div class="rb">
-          <div class="rn"><span class="rk">${i+1}</span>${esc(p.name)}</div>
+          <div class="rn"><span class="rk">${rank}</span>${esc(p.name)}</div>
           ${p.rating ? `<div><span class="pill">★ ${p.rating.toFixed(1)}</span> <span class="meta">(${p.n.toLocaleString()} รีวิว)</span></div>` : ""}
           <div class="meta">${p.prov ? "📍 จ." + esc(p.prov) + " · " : ""}${p.addr ? esc(p.addr) + " · " : ""}กม.ที่ ${(p.along/1000).toFixed(0)} · ห่างเส้นทาง ~${(p.off/1000).toFixed(1)} กม.</div>
           ${p.extra ? `<div class="meta">${esc(p.extra)}</div>` : ""}
@@ -1374,13 +1384,14 @@ function showRec(){
     });
     html += pages > 1
       ? `<div class="row" style="justify-content:space-between;margin-top:10px"><button class="b" id="recPrev" ${slot.page === 0 ? "disabled" : ""}>◀ ก่อนหน้า</button>
-          <span class="meta">หน้า ${slot.page + 1} / ${pages} (${slot.items.length} ที่)</span>
+          <span class="meta">หน้า ${slot.page + 1} / ${pages} (${view.length} ที่${slot.provSel ? " ใน จ." + esc(slot.provSel) : ""})</span>
           <button class="b p" id="recNext" ${slot.page >= pages - 1 ? "disabled" : ""}>ถัดไป ▶</button></div>`
-      : `<div class="meta" style="margin-top:10px;text-align:center">— ทั้งหมด ${slot.items.length} ที่ —</div>`;
+      : `<div class="meta" style="margin-top:10px;text-align:center">— ทั้งหมด ${view.length} ที่${slot.provSel ? " ใน จ." + esc(slot.provSel) : ""} —</div>`;
     html += `<div class="row"><button class="b" id="recGo">🔄 ค้นหาใหม่</button></div>`;
   }
   box.innerHTML = html;
   box.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { recCat = b.dataset.cat; recStarted = true; runRec(recCat); showRec(); });
+  box.querySelectorAll("[data-prov]").forEach(b => b.onclick = () => { slot.provSel = b.dataset.prov || null; slot.page = 0; showRec(); });
   const goPage = d => () => { slot.page = (slot.page || 0) + d; showRec(); box.scrollIntoView({ block:"nearest" }); };
   if ($("#recPrev")) $("#recPrev").onclick = goPage(-1);
   if ($("#recNext")) $("#recNext").onclick = goPage(1);
