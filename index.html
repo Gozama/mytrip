@@ -154,7 +154,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-26-o";
+const APP_VER = "2026-11-26-p";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -352,9 +352,9 @@ function samplePath(path, from, to){
   const out = []; for (let d = from; d < to; d += step) out.push(pointAt(path, d));
   out.push(pointAt(path, to)); return out;
 }
-async function overpass(q){
+async function overpass(q, ms = 20000){
   for (const h of ["https://overpass-api.de/api/interpreter", "https://overpass.kumi.systems/api/interpreter"]){
-    try{ const j = await fetchJSON(h + "?data=" + encodeURIComponent(q), 20000); if (j.elements) return j.elements; }catch(e){}
+    try{ const j = await fetchJSON(h + "?data=" + encodeURIComponent(q), ms); if (j.elements) return j.elements; }catch(e){}
   }
   return null;
 }
@@ -757,8 +757,10 @@ async function draw(day, picks, pts, seq, plan){
   <!--C:rec-->
   <div class="card">
     <h2>⭐ แนะนำสถานที่</h2>
-    <label class="meta" style="display:block">ค้นหาบริเวณ<select class="f" id="recScope" style="margin-top:2px">
-        <option value="route">ตลอดเส้นทางของวันนี้</option>
+    <div class="seg" style="width:100%;margin-bottom:6px"><button style="flex:1" data-rm="rec" class="${recMode === "rec" ? "on" : ""}">⭐ แนะนำ</button><button style="flex:1" data-rm="all" class="${recMode === "all" ? "on" : ""}">🗺️ แสดงทั้งหมด</button></div>
+    <div class="meta" id="recHint" style="margin-bottom:8px">${recHintText()}</div>
+    <label class="meta" id="recScopeBox" style="display:${recMode === "all" ? "none" : "block"}">ค้นหาบริเวณ<select class="f" id="recScope" style="margin-top:2px">
+        <option value="route">ตลอดเส้นทางจุดหมายหลัก (ห่างไม่เกิน 10 กม.)</option>
         <option value="dest">ใกล้ปลายทางสุดท้าย</option>
         <option value="start">ใกล้จุดเริ่มต้น</option>
         ${day.lodging ? `<option value="lodge">ใกล้ที่พัก</option>` : ""}
@@ -856,6 +858,12 @@ async function draw(day, picks, pts, seq, plan){
   document.querySelectorAll("[data-vmv]").forEach(b => b.onclick = () => { const [j, d] = b.dataset.vmv.split(":").map(Number); moveVia(j, d); });
   document.querySelectorAll("[data-vdel]").forEach(b => b.onclick = () => { if (confirm("ลบจุดหมายหลักนี้?")) dropVia(+b.dataset.vdel); });
   $("#recScope").onchange = e => { recScope = e.target.value; if (recStarted) runRec(recCat); showRec(); };
+  document.querySelectorAll("[data-rm]").forEach(b => b.onclick = () => {
+    recMode = b.dataset.rm; ls.set("trip.recmode.v1", recMode);
+    document.querySelectorAll("[data-rm]").forEach(x => x.classList.toggle("on", x.dataset.rm === recMode));
+    $("#recScopeBox").style.display = recMode === "all" ? "none" : "block"; $("#recHint").textContent = recHintText();
+    if (recStarted) runRec(recCat); showRec();
+  });
   if ($("#dayFill")) $("#dayFill").onchange = e => { day.fill = e.target.value; saveTrip(); update(); };
   refreshGoogleUI();
   if ($("#recSet")) $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
@@ -1079,7 +1087,9 @@ function onMapClick(e){
 
 /* ---------- แนะนำสถานที่ (อาหาร / คาเฟ่ / ท่องเที่ยว / ที่พัก / ปั๊ม) ---------- */
 const GKEY = "trip.gkey.v1";
-let gkey = ls.get(GKEY, ""), recMem = {}, recScope = "route", recCat = "food", recStarted = false, curPts = null;
+let gkey = ls.get(GKEY, ""), recMem = {}, recScope = "route", recCat = "food", recStarted = false, curPts = null, recMode = ls.get("trip.recmode.v1", "rec");
+const REC_PAGE = 5;
+const effScope = k => (recMode === "all" && k !== "pump") ? "all" : recScope;      // หมวดปั๊ม/ที่ชาร์จใช้ตามเส้นทางเสมอ
 const CATS = [
   { k:"food", t:"ร้านอาหาร", ico:"🍽", color:"#be123c", g:"ร้านอาหาร", sel:'nwr["amenity"="restaurant"]["name"];' },
   { k:"cafe", t:"คาเฟ่", ico:"☕", color:"#a16207", g:"คาเฟ่ ร้านกาแฟ", sel:'nwr["amenity"="cafe"]["name"];' },
@@ -1097,10 +1107,20 @@ function catOf(k){
     ? { k, t:"ที่ชาร์จ EV", ico:"🔌", color:"#7c3aed", g:"สถานีชาร์จรถไฟฟ้า EV charging station", sel:'nwr["amenity"="charging_station"];', fallback:"สถานีชาร์จ" }
     : { k, t:"ปั๊มน้ำมัน", ico:"⛽", color:"#d97706", g:"ปั๊มน้ำมัน", sel:'nwr["amenity"="fuel"];', fallback:"ปั๊มน้ำมัน" };
 }
+// หาจุดบนเส้นทางที่ใกล้สถานที่ที่สุด (ฉายลงบนส่วนของเส้นทางระหว่างจุดสองจุด ไม่ผูกกับความถี่ของจุดบนเส้นทาง)
 function project(path, lat, lng){
-  let best = null, bd = 1e12;
-  for (const p of path){ const d = hav(p, { lat, lng }); if (d < bd){ bd = d; best = p; } }
-  return { along: best.cum, off: bd };
+  if (path.length < 2){ const p = path[0]; return { along: p ? p.cum : 0, off: p ? hav(p, { lat, lng }) : 0 }; }
+  const kx = Math.cos(lat * Math.PI / 180) * 111320, ky = 110540;
+  let bd = Infinity, along = 0;
+  for (let i = 1; i < path.length; i++){
+    const a = path[i-1], b = path[i];
+    const ax = (a.lng - lng) * kx, ay = (a.lat - lat) * ky, bx = (b.lng - lng) * kx, by = (b.lat - lat) * ky;
+    const dx = bx - ax, dy = by - ay, L2 = dx*dx + dy*dy;
+    let t = L2 > 0 ? -(ax*dx + ay*dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+    const px = ax + t*dx, py = ay + t*dy, d = Math.sqrt(px*px + py*py);
+    if (d < bd){ bd = d; along = a.cum + t * (b.cum - a.cum); }
+  }
+  return { along, off: bd };
 }
 function recCenters(scope, path, day, google){
   const total = path[path.length-1].cum;
@@ -1108,22 +1128,25 @@ function recCenters(scope, path, day, google){
   if (scope === "lodge" && day.lodging) return { pts:[day.lodging], r:10000 };
   if (scope === "dest") return { pts:[day.end], r:10000 };
   if (scope === "start") return { pts:[day.start], r:10000 };
-  if (google){
-    const n = Math.min(3, Math.max(1, Math.ceil(total/60000))), c = [];
+  if (google){      // วงกลมค้นหาเรียงตามเส้นทางทุก ~35 กม. (สูงสุด 8 วง) แล้วกรองให้เหลือที่ห่างเส้นทางไม่เกิน 10 กม.
+    const n = Math.min(8, Math.max(1, Math.ceil(total/35000))), c = [];
     for (let j = 0; j < n; j++) c.push(pointAt(path, total*(j+.5)/n));
-    return { pts:c, r: Math.min(50000, Math.max(8000, total/(2*n)*1.2)) };
+    return { pts:c, r: Math.min(50000, total/n/2 + 10000) };
   }
-  const sp = samplePath(path, 0, total), step = total / Math.max(1, sp.length-1);
-  return { pts:sp, r: Math.min(15000, Math.max(4000, step/1.5)) };
+  return { pts: samplePath(path, 0, total), r:10000 };     // OpenStreetMap: ระยะ 10 กม. รอบเส้นทางทั้งเส้น
 }
-function finalize(items, scope, k){
-  items.sort((a, b) => k === "pump" ? a.off - b.off : (b.score - a.score || a.off - b.off));
-  if (scope === "route"){
-    const near = items.filter(i => i.off <= 15000);
-    items = near.concat(items.filter(i => !near.includes(i)));
+// เรียงตามคะแนนรีวิวมาก→น้อย (ถ้าเท่ากันดูจำนวนรีวิว) · แนะนำ = ห่างเส้นทางไม่เกิน 10 กม. · หมวดปั๊มเรียงตามความใกล้เส้นทาง
+function finalize(items, scope, k, ctx){
+  let list = items;
+  if (k !== "pump"){
+    if (scope === "route") list = list.filter(i => i.off <= 10000);
+    else if (scope !== "all" && ctx && ctx.pts && ctx.pts.length === 1) list = list.filter(i => hav(i, ctx.pts[0]) <= (ctx.r || 10000));
+    if (list.some(i => i.rating)){ const good = list.filter(i => i.n >= 10); if (good.length >= REC_PAGE) list = good; }   // ตัดที่มีรีวิวน้อยเกินไป ถ้าเหลือพอ
   }
-  const out = []; items.forEach(s => { if (!out.some(o => o.name === s.name && hav(o, s) < 300)) out.push(s); });
-  return out.slice(0, 30);
+  list = list.slice().sort((a, b) => k === "pump" ? a.off - b.off
+    : ((b.rating || 0) - (a.rating || 0) || (b.n || 0) - (a.n || 0) || b.score - a.score || a.off - b.off));
+  const out = []; list.forEach(x => { if (!out.some(o => o.name === x.name && hav(o, x) < 300)) out.push(x); });
+  return out.slice(0, 100);
 }
 async function gSearch(q, c, r, minRating){
   if (!googleAllowed()) throw new Error(cfgNow().on ? "ถึงเพดานการใช้เดือนนี้แล้ว" : "เจ้าของปิดการใช้ Google อยู่");
@@ -1141,19 +1164,44 @@ async function gSearch(q, c, r, minRating){
   if (!res.ok) throw new Error(j.error?.message || res.status);
   return j.places || [];
 }
+function gItem(x, path, prov){
+  if (!x.location) return null;
+  const n = x.userRatingCount || 0, rt = x.rating || 0, pr = project(path, x.location.latitude, x.location.longitude), ph = x.photos && x.photos[0] && x.photos[0].name;
+  return { name: x.displayName?.text || "-", lat: x.location.latitude, lng: x.location.longitude, rating: rt, n, prov,
+    addr: x.formattedAddress || "", uri: x.googleMapsUri, along: pr.along, off: pr.off,
+    photo: ph ? `https://places.googleapis.com/v1/${ph}/media?maxHeightPx=300&maxWidthPx=400&key=${encodeURIComponent(gkey)}` : "",
+    score: (n/(n+30))*rt + (30/(n+30))*4.0 };
+}
 async function recGoogle(k, scope, path, day){
-  const c = catOf(k), { pts, r } = recCenters(scope, path, day, true);
-  const all = (await Promise.all(pts.map(p => gSearch(c.g, p, r, k === "pump" ? 0 : 4)))).flat(), seen = new Set(), items = [];
-  all.forEach(x => {
-    if (!x.location || seen.has(x.googleMapsUri)) return; seen.add(x.googleMapsUri);
-    const n = x.userRatingCount || 0, rt = x.rating || 0, pr = project(path, x.location.latitude, x.location.longitude);
-    const ph = x.photos && x.photos[0] && x.photos[0].name;
-    items.push({ name: x.displayName?.text || "-", lat: x.location.latitude, lng: x.location.longitude, rating: rt, n,
-      addr: x.formattedAddress || "", uri: x.googleMapsUri, along: pr.along, off: pr.off,
-      photo: ph ? `https://places.googleapis.com/v1/${ph}/media?maxHeightPx=300&maxWidthPx=400&key=${encodeURIComponent(gkey)}` : "",
-      score: (n/(n+30))*rt + (30/(n+30))*4.0 });   // ถ่วงด้วยจำนวนรีวิว
-  });
-  return finalize(items, scope, k);
+  const c = catOf(k), ctx = recCenters(scope, path, day, true);
+  const all = (await Promise.all(ctx.pts.map(p => gSearch(c.g, p, ctx.r, k === "pump" ? 0 : 4)))).flat(), seen = new Set(), items = [];
+  all.forEach(x => { if (seen.has(x.googleMapsUri)) return; seen.add(x.googleMapsUri); const it = gItem(x, path); if (it) items.push(it); });
+  return finalize(items, scope, k, ctx);
+}
+// หาจังหวัดที่เส้นทางผ่าน (สุ่มตรวจทุก ~30–35 กม. อาจพลาดจังหวัดที่ผ่านสั้นมาก) ใช้บริการหาชื่อพื้นที่ฟรี คิวละ ~1 วินาที ผลจำไว้ในเครื่อง
+async function provincesAlong(path, onProgress){
+  const total = path[path.length-1].cum, step = Math.max(30000, total / 14), pts = [];
+  for (let d = 0; d < total; d += step) pts.push(pointAt(path, d));
+  pts.push(pointAt(path, total));
+  const provs = [], seen = new Set();
+  for (let i = 0; i < pts.length; i++){
+    if (onProgress) onProgress(i + 1, pts.length);
+    const g = await geoName(pts[i].lat, pts[i].lng); if (!g || !g.p) continue;
+    const nm = g.p.replace(/^จ\./, "").replace(/^กรุงเทพฯ$/, "กรุงเทพมหานคร"); if (seen.has(nm)) continue; seen.add(nm);
+    provs.push({ name: nm, full: nm === "กรุงเทพมหานคร" ? nm : "จังหวัด" + nm, at: pts[i] });
+  }
+  return provs;
+}
+const topPerProvince = 12;
+async function recAllGoogle(k, path, day, prog){
+  const provs = await provincesAlong(path, prog); if (!provs.length) throw new Error("หาจังหวัดที่ขับผ่านไม่ได้");
+  const c = catOf(k), items = [];
+  for (let i = 0; i < provs.length; i++){
+    const pv = provs[i]; if (prog) prog(null, null, `กำลังค้นหาใน ${pv.full} (${i+1}/${provs.length})…`);
+    const part = (await gSearch(`${c.g} ${pv.full}`, pv.at, 50000, 4)).map(x => gItem(x, path, pv.name)).filter(Boolean);
+    items.push(...finalize(part, "all", k).slice(0, topPerProvince));
+  }
+  return finalize(items, "all", k);
 }
 function osmScore(t){
   let s = 0;
@@ -1170,8 +1218,17 @@ function osmScore(t){
 const KEEP = ["name","name:th","name:en","brand","operator","network","capacity","wikidata","wikipedia","wikimedia_commons","image",
   "website","contact:website","phone","contact:phone","opening_hours","cuisine","stars","addr:full","addr:street","addr:city"];
 const slimTags = t => { const o = {}; KEEP.forEach(k => { if (t[k] != null) o[k] = String(t[k]).slice(0, 200); }); return o; };
+function osmItem(e, c, path, prov){
+  const pr = project(path, e.lat, e.lng), t = e.t;
+  const name = t.name || t["name:th"] || (c.fallback ? (t.brand || t.operator || c.fallback) : null);
+  return { name, lat: e.lat, lng: e.lng, rating: null, n: 0, along: pr.along, off: pr.off, tags: t, prov,
+    addr: t["addr:full"] || [t["addr:street"], t["addr:city"]].filter(Boolean).join(" "),
+    extra: [t.cuisine && t.cuisine.replace(/;/g, ", "), t.stars && t.stars + " ดาว", t.opening_hours && "เปิด " + t.opening_hours].filter(Boolean).join(" · "),
+    score: osmScore(t) };
+}
+const slimEls = els => els.map(e => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, t: slimTags(e.tags || {}) })).filter(e => e.lat != null);
 async function recOSM(k, scope, path, day){
-  const c = catOf(k), { pts, r } = recCenters(scope, path, day, false);
+  const c = catOf(k), ctx = recCenters(scope, path, day, false), { pts, r } = ctx;
   const around = pts.length === 1 ? `(around:${Math.round(r)},${pts[0].lat},${pts[0].lng})`
     : `(around:${Math.round(r)},${pts.map(p => p.lat.toFixed(5)+","+p.lng.toFixed(5)).join(",")})`;
   const key = "REC2|" + c.k + "|" + c.sel + "|" + around;
@@ -1180,17 +1237,28 @@ async function recOSM(k, scope, path, day){
     const body = c.sel.split(";").filter(Boolean).map(s => s + around + ";").join("");
     els = await overpass(`[out:json][timeout:25];(${body});out center tags 250;`);
     if (!els) throw new Error("ค้นหาไม่ได้");
-    els = els.map(e => ({ lat: e.lat ?? e.center?.lat, lng: e.lon ?? e.center?.lon, t: slimTags(e.tags || {}) })).filter(e => e.lat != null);
-    cache[key] = els; saveCache();
+    els = slimEls(els); cache[key] = els; saveCache();
   }
-  const items = els.map(e => {
-    const pr = project(path, e.lat, e.lng), t = e.t;
-    const name = t.name || t["name:th"] || (c.fallback ? (t.brand || t.operator || c.fallback) : null);
-    return { name, lat: e.lat, lng: e.lng, rating: null, n: 0, along: pr.along, off: pr.off, tags: t,
-      addr: t["addr:full"] || [t["addr:street"], t["addr:city"]].filter(Boolean).join(" "),
-      extra: [t.cuisine && t.cuisine.replace(/;/g, ", "), t.stars && t.stars + " ดาว", t.opening_hours && "เปิด " + t.opening_hours].filter(Boolean).join(" · "),
-      score: osmScore(t) }; }).filter(i => i.name);
-  return finalize(items, scope, k);
+  return finalize(els.map(e => osmItem(e, c, path)).filter(i => i.name), scope, k, ctx);
+}
+async function recAllOSM(k, path, day, prog){
+  const provs = await provincesAlong(path, prog); if (!provs.length) throw new Error("หาจังหวัดที่ขับผ่านไม่ได้");
+  const c = catOf(k), items = [];
+  for (let i = 0; i < provs.length; i++){
+    const pv = provs[i]; if (prog) prog(null, null, `กำลังค้นหาใน ${pv.full} (${i+1}/${provs.length})…`);
+    const key = "RECA|" + c.k + "|" + pv.name + "|" + c.sel;
+    let els = cache[key];
+    if (!els){
+      const area = `area["boundary"="administrative"]["admin_level"="4"]["name"~"^(จังหวัด)?${pv.name}$"]->.a;`;
+      const body = c.sel.split(";").filter(Boolean).map(s => s + "(area.a);").join("");
+      els = await overpass(`[out:json][timeout:40];${area}(${body});out center tags 400;`, 40000);
+      if (!els) throw new Error("ค้นหาไม่ได้");
+      els = slimEls(els); cache[key] = els; saveCache();
+    }
+    const part = els.map(e => osmItem(e, c, path, pv.name)).filter(i => i.name);
+    items.push(...finalize(part, "all", k).slice(0, topPerProvince));
+  }
+  return finalize(items, "all", k);
 }
 const commonsUrl = f => "https://commons.wikimedia.org/wiki/Special:FilePath/" + encodeURIComponent(f.replace(/ /g, "_")) + "?width=480";
 async function osmPhoto(p){
@@ -1212,7 +1280,7 @@ async function osmPhoto(p){
   }
   return "";
 }
-const recKey = () => cur + "|" + recScope;
+const recKey = k => cur + "|" + effScope(k);
 // จำผลแนะนำสถานที่ไว้ในเครื่อง (12 ชั่วโมง) แม้รีโหลดหน้า/สลับวัน/แก้จุดแวะ เพื่อไม่ต้องค้นซ้ำ (ประหยัดโควตา Google ด้วย)
 const RECSTORE = "trip.recstore.v1", REC_TTL = 12 * 3600 * 1000;
 let recStore = ls.get(RECSTORE, {});
@@ -1228,7 +1296,7 @@ function saveRecStore(){
   recStore = out; try{ localStorage.setItem(RECSTORE, txt); }catch(e){}
 }
 async function runRec(k, force){
-  const d = cur, scope = recScope, key = recKey();
+  const d = cur, scope = effScope(k), key = recKey(k);
   recMem[key] = recMem[key] || {};
   if (recMem[key][k] && !force){ showRec(); return; }
   if (recMem[key][k]?.loading) return;
@@ -1237,58 +1305,66 @@ async function runRec(k, force){
   if (!force && st && st.t > Date.now() - REC_TTL && st.k && st.k[k] && st.k[k].items){      // ใช้ผลที่จำไว้
     const path0 = routePath(curPts), items = st.k[k].items;
     items.forEach(it => { const pr = project(path0, it.lat, it.lng); it.along = pr.along; it.off = pr.off; });   // คำนวณตำแหน่งตามเส้นทางปัจจุบันใหม่
-    recMem[key][k] = { items, shown:3, source: st.k[k].source, note: st.k[k].note || "", savedAt: st.t };
+    recMem[key][k] = { items, page:0, source: st.k[k].source, note: st.k[k].note || "", savedAt: st.t };
     showRec(); return;
   }
   if (!gkey && sync && cfgNow().gid && !unlockAsked){ unlockAsked = true; openUnlock(); }   // ผู้ร่วมทริป: ถามรหัสผ่านครั้งแรก
-  recMem[key][k] = { loading:true };
+  const slot0 = recMem[key][k] = { loading:true, msg:"" };
   showRec();
   const day = trip.days[d], path = routePath(curPts);
+  const prog = (i, n, msg) => { slot0.msg = msg || `กำลังหาจังหวัดที่ขับผ่าน… (${i}/${n})`; if (cur === d) showRec(); };
   let source = gkey ? "google" : "osm", note = "", items = null;
   try{
     if (gkey){
-      try{ items = await recGoogle(k, scope, path, day); }
+      try{ items = scope === "all" ? await recAllGoogle(k, path, day, prog) : await recGoogle(k, scope, path, day); }
       catch(e){ note = "Google ใช้ไม่ได้ (" + e.message + ") จึงใช้ข้อมูล OpenStreetMap แทน"; source = "osm"; }
     }
-    if (!items) items = await recOSM(k, scope, path, day);
-    recMem[key][k] = { items, shown:3, source, note };
+    if (!items) items = scope === "all" ? await recAllOSM(k, path, day, prog) : await recOSM(k, scope, path, day);
+    recMem[key][k] = { items, page:0, source, note };
     const ent = recStore[sig] = recStore[sig] || { t: Date.now(), k: {} };
     ent.t = Date.now(); ent.k[k] = { items, source, note }; saveRecStore();
   }catch(e){
     recMem[key][k] = { error:"ค้นหาไม่ได้ ต้องต่ออินเทอร์เน็ต ลองใหม่อีกครั้ง" };
   }
-  if (cur === d && recScope === scope) showRec();
+  if (cur === d) showRec();
 }
+const recHintText = () => recMode === "all"
+  ? "แสดงทั้งหมด: สถานที่หลัก ๆ ของแต่ละจังหวัดที่ขับผ่าน เรียงตามคะแนนมาก→น้อย (หมวดปั๊ม/ที่ชาร์จแสดงตามเส้นทางเสมอ)"
+  : "แนะนำ: สถานที่ที่อยู่บนเส้นทางจุดหมายหลัก หรือห่างจากเส้นทางไม่เกิน 10 กม. เรียงตามคะแนนมาก→น้อย";
 function showRec(){
   const box = $("#recBox"); if (!box) return;
   const day = trip.days[cur]; if (!day) return;
-  const m = recMem[recKey()] || {}, slot = m[recCat], c = catOf(recCat);
+  const m = recMem[recKey(recCat)] || {}, slot = m[recCat], c = catOf(recCat);
   if (MAP) MAP.clear("rec");
   let html = `<div class="chips">` + CATS.map(x => { const d = catOf(x.k);
     return `<button class="chip ${x.k === recCat ? "on" : ""}" data-cat="${x.k}">${d.ico} ${d.t}</button>`; }).join("") + `</div>`;
   if (!slot){
-    html += `<div class="meta" style="margin-top:10px">${recStarted ? "" : "👆 "}เลือกหมวดด้านบนเพื่อค้นหา ระบบจะแสดง 3 ที่เด่นก่อน แล้วกด "แสดงเพิ่ม" เพื่อดูทีละ 3 ที่</div>`;
+    html += `<div class="meta" style="margin-top:10px">${recStarted ? "" : "👆 "}เลือกหมวดด้านบนเพื่อค้นหา ระบบจะเรียงตามคะแนนมากไปน้อย แสดงหน้าละ 5 ที่ และกด "ถัดไป" เพื่อดูหน้าต่อไป</div>`;
   } else if (slot.loading){
-    html += `<div class="meta" style="margin-top:10px">กำลังค้นหา${esc(c.t)}… (อาจใช้เวลาสักครู่)</div>`;
+    html += `<div class="meta" style="margin-top:10px">${esc(slot.msg || "กำลังค้นหา" + c.t + "… (อาจใช้เวลาสักครู่)")}</div>`;
   } else if (slot.error){
     html += `<div class="warn" style="margin-top:10px">${esc(slot.error)} <a href="#" id="recRetry">ลองใหม่</a></div>`;
   } else {
-    const list = slot.items.slice(0, slot.shown);
+    const pages = Math.max(1, Math.ceil(slot.items.length / REC_PAGE));
+    slot.page = Math.min(Math.max(0, slot.page || 0), pages - 1);
+    const base = slot.page * REC_PAGE, list = slot.items.slice(base, base + REC_PAGE);
+    const provs = [...new Set(slot.items.map(x => x.prov).filter(Boolean))];
+    if (effScope(recCat) === "all" && provs.length) html += `<div class="meta" style="margin-top:8px">📍 จังหวัดที่ขับผ่าน: ${provs.map(x => esc(x)).join(" · ")}</div>`;
     if (slot.note) html += `<div class="warn" style="margin-top:8px">${esc(slot.note)}</div>`;
     if (slot.savedAt) html += `<div class="meta" style="margin-top:8px">🕘 ผลที่จำไว้ในเครื่อง (ค้นหาเมื่อ ${new Date(slot.savedAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" })}) กด "ค้นหาใหม่" เพื่ออัปเดต</div>`;
     html += slot.source === "google"
-      ? `<div class="meta" style="margin-top:8px">เรียงตามคะแนนรีวิว Google (ถ่วงด้วยจำนวนรีวิว) · รูปจาก Google อาจมีค่าบริการแยก ดูเมนู ⚙️</div>`
+      ? `<div class="meta" style="margin-top:8px">เรียงตามคะแนนรีวิว Google จากมากไปน้อย (ตัดที่มีรีวิวน้อยกว่า 10 ถ้ามีที่อื่นพอ) · รูปจาก Google อาจมีค่าบริการแยก ดูเมนู ⚙️</div>`
       : `<div class="meta" style="margin-top:8px">⚠ ข้อมูลจาก OpenStreetMap <b>ไม่มีคะแนนรีวิว</b> — เรียงตามความโดดเด่น/ความครบของข้อมูล รูปมีเฉพาะสถานที่ที่มีรูปใน Wikipedia/Wikimedia กด "ดูรีวิว" เพื่อดูคะแนนใน Google Maps</div>`;
     if (!list.length) html += `<div class="meta" style="margin-top:8px">ไม่พบข้อมูลในบริเวณนี้ ลองเปลี่ยน "ค้นหาบริเวณ"</div>`;
-    list.forEach((p, i) => {
-      const added = day.stops.some(s => hav(s, p) < 60);
+    list.forEach((p, ii) => {
+      const i = base + ii, added = day.stops.some(s => hav(s, p) < 60);
       const link = p.uri || `https://www.google.com/maps/search/${encodeURIComponent(p.name)}/@${p.lat},${p.lng},16z`;
       html += `<div class="rc">
         <div class="ph" data-i="${i}"><span>${c.ico}</span></div>
         <div class="rb">
           <div class="rn"><span class="rk">${i+1}</span>${esc(p.name)}</div>
           ${p.rating ? `<div><span class="pill">★ ${p.rating.toFixed(1)}</span> <span class="meta">(${p.n.toLocaleString()} รีวิว)</span></div>` : ""}
-          <div class="meta">${p.addr ? esc(p.addr) + " · " : ""}กม.ที่ ${(p.along/1000).toFixed(0)} · ห่างเส้นทาง ~${(p.off/1000).toFixed(1)} กม.</div>
+          <div class="meta">${p.prov ? "📍 จ." + esc(p.prov) + " · " : ""}${p.addr ? esc(p.addr) + " · " : ""}กม.ที่ ${(p.along/1000).toFixed(0)} · ห่างเส้นทาง ~${(p.off/1000).toFixed(1)} กม.</div>
           ${p.extra ? `<div class="meta">${esc(p.extra)}</div>` : ""}
           <div style="margin-top:4px"><a target="_blank" rel="noopener" href="${esc(link)}">ดูรีวิว/นำทาง</a> ·
           ${added ? `<span class="meta">✓ เพิ่มเป็นจุดแวะแล้ว</span>` : `<button class="b" data-rec="${i}" style="padding:2px 10px">＋ เพิ่มเป็นจุดแวะ</button>`}</div>
@@ -1296,14 +1372,18 @@ function showRec(){
       if (MAP) MAP.marker({ lat:p.lat, lng:p.lng, label:c.ico, color:c.color, tag:"rec",
         popup: popEl(`<b>${esc(p.name)}</b>${p.rating ? `<br>★ ${p.rating.toFixed(1)} (${p.n} รีวิว)` : ""}<br><a target="_blank" rel="noopener" href="${esc(link)}">ดูรีวิว/นำทาง</a>`) });
     });
-    html += slot.shown < slot.items.length
-      ? `<button class="b p" id="recMore" style="width:100%;margin-top:10px">＋ แสดงเพิ่มอีก 3 ที่ <span style="opacity:.8">(${slot.shown}/${slot.items.length})</span></button>`
-      : `<div class="meta" style="margin-top:10px;text-align:center">— แสดงครบ ${slot.items.length} ที่แล้ว —</div>`;
+    html += pages > 1
+      ? `<div class="row" style="justify-content:space-between;margin-top:10px"><button class="b" id="recPrev" ${slot.page === 0 ? "disabled" : ""}>◀ ก่อนหน้า</button>
+          <span class="meta">หน้า ${slot.page + 1} / ${pages} (${slot.items.length} ที่)</span>
+          <button class="b p" id="recNext" ${slot.page >= pages - 1 ? "disabled" : ""}>ถัดไป ▶</button></div>`
+      : `<div class="meta" style="margin-top:10px;text-align:center">— ทั้งหมด ${slot.items.length} ที่ —</div>`;
     html += `<div class="row"><button class="b" id="recGo">🔄 ค้นหาใหม่</button></div>`;
   }
   box.innerHTML = html;
   box.querySelectorAll("[data-cat]").forEach(b => b.onclick = () => { recCat = b.dataset.cat; recStarted = true; runRec(recCat); showRec(); });
-  const more = $("#recMore"); if (more) more.onclick = () => { slot.shown = Math.min(slot.items.length, slot.shown + 3); showRec(); };
+  const goPage = d => () => { slot.page = (slot.page || 0) + d; showRec(); box.scrollIntoView({ block:"nearest" }); };
+  if ($("#recPrev")) $("#recPrev").onclick = goPage(-1);
+  if ($("#recNext")) $("#recNext").onclick = goPage(1);
   const go = $("#recGo"); if (go) go.onclick = () => runRec(recCat, true);
   const rt = $("#recRetry"); if (rt) rt.onclick = e => { e.preventDefault(); runRec(recCat, true); };
   box.querySelectorAll("[data-rec]").forEach(b => b.onclick = () => {
