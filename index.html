@@ -154,7 +154,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-26-n";
+const APP_VER = "2026-11-26-o";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -219,6 +219,63 @@ const uiEff = () => uiMode || (isGuest() ? "simple" : "full");
 const VHINT = { fuel:{ range:"เช่น 600", warn:"เช่น 100", rest:"เช่น 10" }, ev:{ range:"เช่น 350", warn:"เช่น 70", rest:"เช่น 40" } };
 let veh = Object.assign({ type:"fuel", name:"", range:"", level:"", warn:"", rest:"" }, ls.get("trip.veh.v1", {}));
 
+/* ---------- ชื่อพื้นที่ (อำเภอ/จังหวัด) ของจุดบนเส้นทาง ---------- */
+let geoLast = 0, geoQ = Promise.resolve();
+const geoPending = {}, evLabels = {};
+const shortD = x => x ? String(x).replace(/^อำเภอ/, "อ.").replace(/^กิ่งอำเภอ/, "กิ่ง อ.").trim() : "";
+const shortP = x => x ? String(x).replace(/^จังหวัด/, "จ.").replace(/^กรุงเทพมหานคร$/, "กรุงเทพฯ").trim() : "";
+// แปลงพิกัด → { d: อำเภอ/เขต, p: จังหวัด } จากบริการฟรี (Nominatim → สำรอง Photon) คิวละ 1 ครั้งต่อ ~1.1 วินาที และจำผลไว้ในเครื่อง
+function geoName(lat, lng){
+  const key = "G|" + lat.toFixed(3) + "," + lng.toFixed(3);
+  if (cache[key]) return Promise.resolve(cache[key]);
+  if (geoPending[key]) return geoPending[key];
+  const p = geoQ.then(async () => {
+    const wait = geoLast + 1100 - Date.now(); if (wait > 0) await new Promise(r => setTimeout(r, wait));
+    geoLast = Date.now();
+    let res = null;
+    try{
+      const j = await fetchJSON(`https://nominatim.openstreetmap.org/reverse?format=jsonv2&zoom=10&accept-language=th&lat=${lat}&lon=${lng}`, 8000), a = j.address || {};
+      res = { d: shortD(a.county || a.city_district || a.municipality || a.town || a.city || ""), p: shortP(a.state || a.province || "") };
+    }catch(e){}
+    if (!res || (!res.d && !res.p)){
+      try{
+        const j = await fetchJSON(`https://photon.komoot.io/reverse?lat=${lat}&lon=${lng}`, 8000), pr = (j.features && j.features[0] && j.features[0].properties) || {};
+        res = { d: shortD(pr.county || pr.district || pr.city || ""), p: shortP(pr.state || "") };
+      }catch(e){ res = null; }
+    }
+    if (res && !res.d && !res.p) res = null;
+    if (res){ cache[key] = res; saveCache(); }
+    return res;
+  });
+  geoQ = p.catch(() => null);
+  return (geoPending[key] = p.finally(() => { delete geoPending[key]; }));
+}
+function areaText(a, z){
+  if (!a && !z) return null;
+  const A = a || z, Z = z || a, nm = o => (o.d ? o.d + " " : "") + o.p;
+  if (A.d === Z.d && A.p === Z.p) return "แถว " + [A.d, A.p].filter(Boolean).join(" ");
+  if (A.p === Z.p) return "ช่วง " + (A.d || A.p) + " – " + (Z.d || Z.p) + (A.d && Z.d ? " " + A.p : "");
+  return "ช่วง " + nm(A).trim() + " – " + nm(Z).trim();
+}
+function evKey(e, path){
+  const a = pointAt(path, e.alertAt), z = pointAt(path, e.win[1]), f = q => q.lat.toFixed(3) + "," + q.lng.toFixed(3);
+  return { a, z, key: f(a) + "|" + f(z) };
+}
+function evKmText(e){ const x = (e.alertAt/1000).toFixed(0), y = (e.win[1]/1000).toFixed(0); return x === y ? "ประมาณกม.ที่ " + x : "ช่วงกม.ที่ " + x + "–" + y; }
+function evLoc(e, path){       // ข้อความตำแหน่งจุดเติม: ใช้ชื่ออำเภอ/จังหวัดถ้ามีแล้ว ไม่งั้นแสดงกม.ไปก่อน แล้วค่อยเปลี่ยนเมื่อได้ชื่อ
+  const k = evKey(e, path);
+  return `<span data-evloc="${esc(k.key)}" title="${esc(evKmText(e))}">${esc(evLabels[k.key] || evKmText(e))}</span>`;
+}
+async function resolveEvLabels(events, path){
+  for (const e of events){
+    const k = evKey(e, path); if (evLabels[k.key]) continue;
+    const [a, z] = await Promise.all([geoName(k.a.lat, k.a.lng), geoName(k.z.lat, k.z.lng)]);
+    const t = areaText(a, z); if (!t) continue;
+    evLabels[k.key] = t;
+    document.querySelectorAll("[data-evloc]").forEach(el => { if (el.dataset.evloc === k.key) el.textContent = t; });
+  }
+}
+
 // วางแผนว่าจะต้องเติม/ชาร์จที่ระยะกี่เมตรของเส้นทาง
 // startOverride = พลังงานที่เหลือตอนออกเดินทาง (เมตร) ถ้าไม่ระบุ ใช้ % ที่กรอก (ไม่กรอก = เต็ม)
 // kp = จุดเติม/ชาร์จที่ผู้ใช้รู้แล้วบนเส้นทาง [{pos, e, pct, name, kind}] — ถึงจุดนั้นก่อนหมด ไม่ต้องแนะนำปั๊มอื่น
@@ -282,7 +339,14 @@ function routePath(pts){
   out.forEach(p => p.cum *= k);
   return out;
 }
-const pointAt = (path, d) => path.find(p => p.cum >= d) || path[path.length-1];
+// ตำแหน่งที่ระยะ d บนเส้นทาง (ประมาณค่าระหว่างจุดสองจุด ไม่ปัดไปจุดถัดไป)
+const pointAt = (path, d) => {
+  const i = path.findIndex(p => p.cum >= d);
+  if (i < 0) return path[path.length-1];
+  if (i === 0) return path[0];
+  const a = path[i-1], b = path[i], span = b.cum - a.cum, f = span > 0 ? (d - a.cum) / span : 0;
+  return { lat: a.lat + (b.lat - a.lat) * f, lng: a.lng + (b.lng - a.lng) * f, cum: d };
+};
 function samplePath(path, from, to){
   let step = 4000; if ((to-from)/step > 24) step = (to-from)/24;
   const out = []; for (let d = from; d < to; d += step) out.push(pointAt(path, d));
@@ -334,7 +398,7 @@ async function renderFuel(day, pts, plan){
     const list = await findStations(sp, ev, path, e.win[0], e.win[1]);
     if (my !== reqId) return;
     const gm = `https://www.google.com/maps/search/${encodeURIComponent(ev ? "EV charging station" : "gas station")}/@${a.lat},${a.lng},12z`;
-    html += `<div class="evh">ครั้งที่ ${i+1}${e.before ? " (ก่อนถึง " + esc(e.before) + ")" : ""}: เริ่มแนะนำที่ ~กม.ที่ ${(e.alertAt/1000).toFixed(0)} · ควร${ev?"ชาร์จ":"เติม"}ก่อน ~กม.ที่ ${(e.win[1]/1000).toFixed(0)}${e.emptyAt > routeData.distance ? "" : " (พลังงานหมด)"}</div>`;
+    html += `<div class="evh">ครั้งที่ ${i+1}${e.before ? " (ก่อนถึง " + esc(e.before) + ")" : ""}: ควร${ev ? "ชาร์จ" : "เติม"} ${evLoc(e, path)}${e.emptyAt > routeData.distance ? "" : " (ก่อนพลังงานหมด)"}</div>`;
     if (MAP) MAP.marker({ lat:a.lat, lng:a.lng, label:"!", color:"#ea580c", z:300, tag:"fuel",
       popup: popEl(`<b>จุดเริ่มแนะนำ${ev?"ชาร์จ":"เติมน้ำมัน"}</b><br>ครั้งที่ ${i+1} · กม.ที่ ${(e.alertAt/1000).toFixed(0)}`) });
     if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (เซิร์ฟเวอร์ตอบช้าหรือไม่มีอินเทอร์เน็ต) <button class="b" data-fretry style="padding:2px 8px">🔄 ลองใหม่</button> — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
@@ -349,6 +413,7 @@ async function renderFuel(day, pts, plan){
     });
   }
   box.innerHTML = html;
+  resolveEvLabels(plan.events, path);
   box.querySelectorAll("[data-fretry]").forEach(b => b.onclick = () => { for (const k in failUntil) delete failUntil[k]; renderFuel(day, pts, plan); });
 }
 
@@ -569,6 +634,7 @@ async function draw(day, picks, pts, seq, plan){
   const tm = c => dep ? `<b>${c}</b> ` : "";
   let tl = `<li>${tm(clock)}${dep ? "" : "<b>"}ออกเดินทาง${dep ? "" : "</b>"} — ${esc(day.start.name)}</li>`;
   // แทรกจุดเติม/ชาร์จที่ระบบแนะนำ (ตามระยะบนเส้นทาง) พร้อมเวลาเติม/ชาร์จต่อครั้ง เข้าไปในตารางเวลา
+  const pathAll = routePath(pts);
   const posArr = seqPositions(routeData.legs), evs = plan.events.slice().sort((a, b) => a.alertAt - b.alertAt);
   let evi = 0;
   seq.slice(1).forEach((x, k) => {
@@ -578,7 +644,7 @@ async function draw(day, picks, pts, seq, plan){
       const e0 = evs[evi++], frac = leg.distance ? Math.min(1, Math.max(0, (e0.alertAt - segStart) / leg.distance)) : 0;
       const dD = Math.max(0, leg.distance * frac - doneD), dT = Math.max(0, leg.duration * frac - doneT), rest = Number(veh.rest) || 0;
       adv(dT/60);
-      tl += `<li><div class="leg">🚗 ${fmtKm(dD)} · ${fmtDur(dT)}</div>${tm(clock)}<b>${isEV ? "⚡ ชาร์จแบต" : "⛽ เติมน้ำมัน"}</b> <span class="leg">(ที่ระบบแนะนำ ประมาณกม.ที่ ${(e0.alertAt/1000).toFixed(0)})</span>`;
+      tl += `<li><div class="leg">🚗 ${fmtKm(dD)} · ${fmtDur(dT)}</div>${tm(clock)}<b>${isEV ? "⚡ ชาร์จแบต" : "⛽ เติมน้ำมัน"}</b> <span class="leg">(ที่ระบบแนะนำ ${evLoc(e0, pathAll)})</span>`;
       if (rest){ adv(rest); tl += ` <span class="leg">(อยู่ ${rest} นาที${dep ? " → ออก " + clock : ""})</span>`; }
       else tl += ` <span class="leg">(ยังไม่ได้ใส่เวลา${isEV ? "ชาร์จ" : "เติม"}ต่อครั้งในข้อมูลรถ)</span>`;
       tl += `</li>`;
@@ -752,6 +818,7 @@ async function draw(day, picks, pts, seq, plan){
       + `<div id="extras" ${extrasOpen ? "" : "hidden"}>` + ["sched", "veh", "rec", "share", "adv"].map(k => parts[k] || "").join("") + `</div>`;
   }
   $("#panel").innerHTML = out;
+  resolveEvLabels(plan.events, pathAll);          // แปลงตำแหน่งจุดเติมเป็นชื่ออำเภอ/จังหวัด (ทำเบื้องหลัง)
 
   // events
   document.querySelectorAll("[data-ui]").forEach(b => b.onclick = () => { uiMode = b.dataset.ui; ls.set("trip.ui.v1", uiMode); update(); });
