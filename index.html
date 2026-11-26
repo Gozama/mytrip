@@ -70,6 +70,11 @@ details summary{cursor:pointer;font-weight:600}
 .sch{display:flex;justify-content:space-between;gap:8px;align-items:center;padding:8px 0;border-top:1px solid var(--line);font-size:14px}
 .cat{font-weight:700;margin:14px 0 2px}
 .tab.add{border-style:dashed;color:var(--pri)}
+.pinwrap{position:relative;width:28px;height:28px}
+.plabel{position:absolute;left:33px;top:50%;transform:translateY(-50%);white-space:nowrap;font-size:12px;font-weight:600;line-height:1.2;
+  background:rgba(255,255,255,.93);color:#222;padding:1px 6px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.35);pointer-events:none}
+.card .note{font-size:13px;white-space:pre-wrap;margin-top:2px}
+.modebar{flex-wrap:wrap}
 .modebar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
 .seg{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--card)}
 .seg button{border:0;background:transparent;color:var(--ink);padding:8px 14px;font-size:14px;cursor:pointer}
@@ -154,7 +159,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-26-q";
+const APP_VER = "2026-11-27-r";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -209,7 +214,7 @@ try{
   }
 }catch(e){}
 trip = cleanTrip(trip) || JSON.parse(JSON.stringify(DEFAULT_TRIP));
-let cur = 0, tableData = null, routeData = null, reqId = 0;
+let cur = 0, tableData = null, routeData = null, reqId = 0, curSeq = null;
 // โหมดแสดงผล: แบบง่าย (เห็นเฉพาะที่ใช้บ่อย) / แบบเต็ม ผู้ร่วมทริปเริ่มที่แบบง่าย เจ้าของเริ่มที่แบบเต็ม
 let uiMode = ls.get("trip.ui.v1", null), extrasOpen = ls.get("trip.extras.v1", false), tipsSeen = ls.get("trip.tips.v1", false);
 const uiEff = () => uiMode || (isGuest() ? "simple" : "full");
@@ -262,6 +267,11 @@ function evKey(e, path){
   return { a, z, key: f(a) + "|" + f(z) };
 }
 function evKmText(e){ const x = (e.alertAt/1000).toFixed(0), y = (e.win[1]/1000).toFixed(0); return x === y ? "ประมาณกม.ที่ " + x : "ช่วงกม.ที่ " + x + "–" + y; }
+const evStations = {};
+function evStn(e, path){      // ชื่อปั๊ม/สถานีชาร์จตัวอย่างในช่วงนั้น (ขึ้นเมื่อค้นเจอ)
+  const k = evKey(e, path).key;
+  return `<span data-evstn="${esc(k)}">${evStations[k] ? "เช่น " + esc(evStations[k]) + " · " : ""}</span>`;
+}
 function evLoc(e, path){       // ข้อความตำแหน่งจุดเติม: ใช้ชื่ออำเภอ/จังหวัดถ้ามีแล้ว ไม่งั้นแสดงกม.ไปก่อน แล้วค่อยเปลี่ยนเมื่อได้ชื่อ
   const k = evKey(e, path);
   return `<span data-evloc="${esc(k.key)}" title="${esc(evKmText(e))}">${esc(evLabels[k.key] || evKmText(e))}</span>`;
@@ -313,6 +323,7 @@ function activeEnergy(p){
   return (e.type === "both" || e.type === veh.type) ? e : null;
 }
 const energyPct = e => Math.min(100, Math.max(1, Number(e && e.pct) || 100));
+const noteHtml = p => p && p.note ? "<br>📝 " + esc(p.note) : "";
 function eb(p){
   if (!p || !p.energy) return "";
   const e = p.energy, ok = !!activeEnergy(p), ic = e.type === "ev" ? "⚡" : e.type === "fuel" ? "⛽" : "⚡⛽";
@@ -391,6 +402,7 @@ async function renderFuel(day, pts, plan){
       → ${ev ? "ชาร์จ" : "เติม"}ถึง ${k.pct}%${k.low ? ` <span class="warn">(ต่ำกว่าเกณฑ์ที่ตั้งไว้ ถึงแบบหวุดหวิด)</span>` : ""}</div>`).join("");
   if (!plan.events.length){ box.innerHTML = head + knownHtml + `<div class="meta">✅ รถวิ่งถึงปลายทางได้โดยไม่ต้อง${ev?"ชาร์จ":"เติมน้ำมัน"}ระหว่างทาง</div>`; return; }
   box.innerHTML = head + knownHtml + `<div class="meta">กำลังค้นหา${word}ตามเส้นทาง…</div>`;
+  const stnList = [];
   let html = head + knownHtml;
   for (let i = 0; i < plan.events.length; i++){
     const e = plan.events[i], a = pointAt(path, e.alertAt);
@@ -403,16 +415,25 @@ async function renderFuel(day, pts, plan){
       popup: popEl(`<b>จุดเริ่มแนะนำ${ev?"ชาร์จ":"เติมน้ำมัน"}</b><br>ครั้งที่ ${i+1} · กม.ที่ ${(e.alertAt/1000).toFixed(0)}`) });
     if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (เซิร์ฟเวอร์ตอบช้าหรือไม่มีอินเทอร์เน็ต) <button class="b" data-fretry style="padding:2px 8px">🔄 ลองใหม่</button> — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
     else if (!list.length) html += `<div class="warn">ไม่พบ${word}ในช่วงนี้ในแผนที่ OpenStreetMap — <a target="_blank" rel="noopener" href="${gm}">ลองค้นใน Google Maps</a></div>`;
-    else list.forEach(s => {
+    else {
+      const k0 = evKey(e, path).key; if (list[0]){ evStations[k0] = list[0].name; document.querySelectorAll("[data-evstn]").forEach(el => { if (el.dataset.evstn === k0) el.textContent = "เช่น " + list[0].name + " · "; }); }
+      list.forEach(s => {
+      stnList.push(s);
       html += `<div class="st">${ico} <b>${esc(s.name)}</b>${s.sub ? ` <span class="meta">(${esc(s.sub)})</span>` : ""}<br>
         <span class="meta">กม.ที่ ${(s.along/1000).toFixed(0)} ของเส้นทาง · ห่างถนน ~${(s.off/1000).toFixed(1)} กม.${s.cap ? " · " + esc(s.cap) + " หัวชาร์จ" : ""} ·
         เหลือพลังงานเมื่อถึง ~${Math.max(0, Math.round((e.emptyAt - s.along)/1000))} กม.</span><br>
-        <a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}">นำทาง</a></div>`;
+        <a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}">นำทาง</a> ·
+        <button class="b" data-stn="${stnList.length - 1}" style="padding:2px 10px">＋ ใช้เป็นจุดแวะ${ev ? "ชาร์จ" : "เติม"}</button></div>`;
       if (MAP) MAP.marker({ lat:s.lat, lng:s.lng, label:ico, color: ev ? "#7c3aed" : "#d97706", tag:"fuel",
         popup: popEl(`<b>${esc(s.name)}</b><br>กม.ที่ ${(s.along/1000).toFixed(0)}<br><a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}">นำทาง</a>`) });
-    });
+      });
+    }
   }
   box.innerHTML = html;
+  box.querySelectorAll("[data-stn]").forEach(b => b.onclick = () => {      // เปลี่ยนจุดที่ระบบแนะนำให้เป็นจุดแวะจริง (มีชื่อ เวลา โน้ตของตัวเอง)
+    const st = stnList[+b.dataset.stn];
+    addStop(st, { stay: 0, note: "", energy: { type: ev ? "ev" : "fuel", pct: 100, mins: "", detourKm: 0, detourMin: 0, note: "" } });
+  });
   resolveEvLabels(plan.events, path);
   box.querySelectorAll("[data-fretry]").forEach(b => b.onclick = () => { for (const k in failUntil) delete failUntil[k]; renderFuel(day, pts, plan); });
 }
@@ -595,7 +616,7 @@ async function update(){
 }
 
 async function draw(day, picks, pts, seq, plan){
-  curPts = pts;
+  curPts = pts; curSeq = seq;
   const guest = isGuest(), simple = uiEff() === "simple";
   const T = tableData, direct = T.base, vias = day.vias || [];
   const mains = [day.start, ...vias, day.end];
@@ -619,11 +640,12 @@ async function draw(day, picks, pts, seq, plan){
         <div class="nm">${esc(s.name)} ${eb(s)}</div>
         <div class="meta">จาก${T.M > 2 ? " " + esc(mains[t.leg].name) : "จุดเริ่มต้น"} <b>${fmtKm(t.distance)}</b> · <b>${fmtDur(t.duration)}</b></div>
         ${T.M > 2 && !simple ? `<div class="meta">อยู่ในช่วง ${esc(mains[t.leg].name)} → ${esc(mains[t.leg+1].name)}</div>` : ""}
-        ${s.note ? `<div class="note">${esc(s.note)}</div>` : ""}
+        ${s.note ? `<div class="note">📝 ${esc(s.note)}</div>` : ""}
         <div class="meta" onclick="event.stopPropagation()">แวะประมาณ
           <input class="stay" type="number" min="0" step="5" value="${stayOf(i)}" data-stay="${i}"> นาที
-          ${simple ? "" : `<button class="b" data-en="stop:${i}" style="padding:2px 8px;margin-left:6px" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>
-          <button class="b" data-del="${i}" style="padding:2px 8px;margin-left:4px" aria-label="ลบจุดแวะ">🗑</button>`}</div>
+          <button class="b" data-edit="stop:${i}" style="padding:3px 9px;margin-left:6px" aria-label="แก้ไขชื่อ เวลา โน้ต">✏️ แก้ไข</button>
+          ${simple ? "" : `<button class="b" data-en="stop:${i}" style="padding:3px 9px;margin-left:4px" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>`}
+          <button class="b" data-del="${i}" style="padding:3px 9px;margin-left:4px" aria-label="ลบจุดแวะ">🗑 ลบ</button></div>
       </div></div>`;
   }).join("");
 
@@ -632,7 +654,8 @@ async function draw(day, picks, pts, seq, plan){
   let clock = dep, finalArrive = "", cm = 0;      // cm = นาทีที่ผ่านไปนับจากออกเดินทาง (สะสมแบบทศนิยม แปลงเป็นเวลาทีเดียว ไม่ให้เศษปัดสะสม)
   const adv = mins => { cm += mins; clock = dep ? addMin(dep, cm) : ""; };
   const tm = c => dep ? `<b>${c}</b> ` : "";
-  let tl = `<li>${tm(clock)}${dep ? "" : "<b>"}ออกเดินทาง${dep ? "" : "</b>"} — ${esc(day.start.name)}</li>`;
+  const tnote = p => p && p.note ? ` <span class="leg">📝 ${esc(p.note)}</span>` : "";
+  let tl = `<li>${tm(clock)}${dep ? "" : "<b>"}ออกเดินทาง${dep ? "" : "</b>"} — ${esc(day.start.name)}${tnote(day.start)}</li>`;
   // แทรกจุดเติม/ชาร์จที่ระบบแนะนำ (ตามระยะบนเส้นทาง) พร้อมเวลาเติม/ชาร์จต่อครั้ง เข้าไปในตารางเวลา
   const pathAll = routePath(pts);
   const posArr = seqPositions(routeData.legs), evs = plan.events.slice().sort((a, b) => a.alertAt - b.alertAt);
@@ -644,7 +667,7 @@ async function draw(day, picks, pts, seq, plan){
       const e0 = evs[evi++], frac = leg.distance ? Math.min(1, Math.max(0, (e0.alertAt - segStart) / leg.distance)) : 0;
       const dD = Math.max(0, leg.distance * frac - doneD), dT = Math.max(0, leg.duration * frac - doneT), rest = Number(veh.rest) || 0;
       adv(dT/60);
-      tl += `<li><div class="leg">🚗 ${fmtKm(dD)} · ${fmtDur(dT)}</div>${tm(clock)}<b>${isEV ? "⚡ ชาร์จแบต" : "⛽ เติมน้ำมัน"}</b> <span class="leg">(ที่ระบบแนะนำ ${evLoc(e0, pathAll)})</span>`;
+      tl += `<li><div class="leg">🚗 ${fmtKm(dD)} · ${fmtDur(dT)}</div>${tm(clock)}<b>${isEV ? "⚡ ชาร์จแบต" : "⛽ เติมน้ำมัน"}</b> <span class="leg">(ที่ระบบแนะนำ ${evStn(e0, pathAll)}${evLoc(e0, pathAll)})</span>`;
       if (rest){ adv(rest); tl += ` <span class="leg">(อยู่ ${rest} นาที${dep ? " → ออก " + clock : ""})</span>`; }
       else tl += ` <span class="leg">(ยังไม่ได้ใส่เวลา${isEV ? "ชาร์จ" : "เติม"}ต่อครั้งในข้อมูลรถ)</span>`;
       tl += `</li>`;
@@ -655,7 +678,7 @@ async function draw(day, picks, pts, seq, plan){
     finalArrive = clock;
     const lbl = x.kind === "end" ? "ถึงปลายทาง" : x.kind === "lodging" ? "🛏 ถึงที่พัก" : x.kind === "via" ? "📍 ถึงจุดหมายหลัก" : "แวะ";
     const st = effStay(x), en = activeEnergy(x.p);
-    tl += `<li><div class="leg">🚗 ${fmtKm(remD)} · ${fmtDur(remT)}</div>${tm(clock)}<b>${lbl}</b> — ${esc(x.p.name)}${en ? " " + eb(x.p) : ""}`;
+    tl += `<li><div class="leg">🚗 ${fmtKm(remD)} · ${fmtDur(remT)}</div>${tm(clock)}<b>${lbl}</b> — ${esc(x.p.name)}${en ? " " + eb(x.p) : ""}${tnote(x.p)}`;
     if (st){ adv(st); tl += ` <span class="leg">(อยู่ ${st} นาที${dep ? " → ออก " + clock : ""})</span>`; }
     tl += `</li>`;
   });
@@ -668,7 +691,9 @@ async function draw(day, picks, pts, seq, plan){
       <span class="pill">${vias.length ? "ผ่านจุดหมายหลักทั้งหมด" : "ตรงไปเลย"} ${fmtKm(direct.distance)}</span>
       <span class="pill">${fmtDur(direct.duration)}</span>
       <label class="meta">ออกเดินทาง <input type="time" id="dep" value="${dep}"></label>
+      <button class="b" id="dayNoteBtn" style="padding:4px 10px">📝 ${day.note ? "แก้โน้ตวันนี้" : "เพิ่มโน้ต"}</button>
     </div>
+    ${day.note ? `<div class="note" style="margin-top:6px">📝 ${esc(day.note)}</div>` : ""}
     ${est ? `<div class="warn">⚠ ไม่ได้ต่ออินเทอร์เน็ต/คำนวณเส้นทางจริงไม่ได้ จึงแสดงค่าประมาณจากระยะเส้นตรง</div>` : ""}
   </div>
 
@@ -679,23 +704,24 @@ async function draw(day, picks, pts, seq, plan){
       <label>วันที่เดินทาง<input class="f" type="date" data-d="date" value="${esc(day.date || "")}"></label>
       <label>ชื่อวัน/หมายเหตุ<input class="f" data-d="label" value="${esc(day.label || "")}" placeholder="เช่น วันที่ 5 เหนือ"></label>
     </div>
-    <div class="sch"><span>🟢 เริ่มต้น: <b>${esc(day.start.name)}</b> ${eb(day.start)}</span><span style="display:flex;gap:6px"><button class="b" data-en="start" aria-label="จุดเติม/ชาร์จ">⚡⛽</button><button class="b" data-act="start">เปลี่ยน</button></span></div>
+    <div class="sch"><span>🟢 เริ่มต้น: <b>${esc(day.start.name)}</b> ${eb(day.start)}</span><span style="display:flex;gap:6px"><button class="b" data-edit="start" aria-label="แก้ไข/โน้ต">✏️</button><button class="b" data-en="start" aria-label="จุดเติม/ชาร์จ">⚡⛽</button><button class="b" data-act="start">เปลี่ยน</button></span></div>
     ${cur > 0 && trip.days[cur-1] && hav(day.start, trip.days[cur-1].lodging || trip.days[cur-1].end) > 300
       ? `<div class="warn" style="margin:-2px 0 6px">จุดเริ่มต้นวันนี้ไม่ตรงกับที่พัก/ปลายทางของวันก่อน (${esc((trip.days[cur-1].lodging || trip.days[cur-1].end).name)}) <button class="b" data-act="startprev" style="padding:2px 8px">ใช้เป็นต้นทาง</button></div>` : ""}
-    <div class="sch"><span>🔴 ปลายทางสุดท้าย: <b>${esc(day.end.name)}</b> ${eb(day.end)}</span><span style="display:flex;gap:6px"><button class="b" data-en="end" aria-label="จุดเติม/ชาร์จ">⚡⛽</button><button class="b" data-act="end">เปลี่ยน</button></span></div>
+    <div class="sch"><span>🔴 ปลายทางสุดท้าย: <b>${esc(day.end.name)}</b> ${eb(day.end)}</span><span style="display:flex;gap:6px"><button class="b" data-edit="end" aria-label="แก้ไข/โน้ต">✏️</button><button class="b" data-en="end" aria-label="จุดเติม/ชาร์จ">⚡⛽</button><button class="b" data-act="end">เปลี่ยน</button></span></div>
     <div class="sch" style="flex-wrap:wrap"><span>🛏 ที่พักคืนนี้: ${day.lodging ? `<b>${esc(day.lodging.name)}</b> ${eb(day.lodging)}` : `<span class="meta">ใช้ปลายทางสุดท้ายเป็นที่พัก</span>`}</span>
       <span style="display:flex;gap:6px;flex-wrap:wrap">
-        ${day.lodging ? `<button class="b" data-en="lodging" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>` : ""}
+        ${day.lodging ? `<button class="b" data-edit="lodging" aria-label="แก้ไข/โน้ต">✏️</button><button class="b" data-en="lodging" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>` : ""}
         ${!day.lodging && cur > 0 && trip.days[cur-1] && (trip.days[cur-1].lodging || trip.days[cur-1].end) ? `<button class="b" data-act="samelodge">เหมือนคืนก่อน</button>` : ""}
         <button class="b" data-act="lodging">${day.lodging ? "เปลี่ยน" : "ตั้งที่พัก"}</button>
         ${day.lodging ? `<button class="b" data-act="rmlodge">ลบ</button>` : ""}</span></div>
     <div class="cat" style="margin-top:12px">📍 จุดหมายหลักระหว่างวัน <span class="meta">(ต้องไปทุกที่ เรียงตามลำดับ)</span></div>
     ${vias.map((v, j) => `<div class="sch" style="flex-wrap:wrap">
-        <span><b>${j+1}. ${esc(v.name)}</b> ${eb(v)}</span>
+        <span><b>${j+1}. ${esc(v.name)}</b> ${eb(v)}${v.note ? `<span class="note" style="display:block">📝 ${esc(v.note)}</span>` : ""}</span>
         <span class="meta">อยู่ที่นี่ <input class="stay" type="number" min="0" step="5" value="${Number(v.stay || 0)}" data-vstay="${j}"> นาที</span>
         <span style="display:flex;gap:6px;width:100%;justify-content:flex-end">
           <button class="b" data-vmv="${j}:-1" ${j === 0 ? "disabled" : ""} aria-label="เลื่อนขึ้น">⬆️</button>
           <button class="b" data-vmv="${j}:1" ${j === vias.length-1 ? "disabled" : ""} aria-label="เลื่อนลง">⬇️</button>
+          <button class="b" data-edit="via:${j}" aria-label="แก้ไขชื่อ เวลา โน้ต">✏️</button>
           <button class="b" data-en="via:${j}" aria-label="จุดเติม/ชาร์จ">⚡⛽</button>
           <button class="b" data-vdel="${j}" aria-label="ลบ">🗑</button></span></div>`).join("")
       || `<div class="meta">ยังไม่มี — ใช้เมื่อวันนี้ต้องไปมากกว่า 1 ที่ เช่น ต้นทาง → ที่ A → ที่ B → ปลายทาง (จุดแวะที่เลือกหรือไม่เลือกได้ แยกอยู่ด้านล่าง)</div>`}
@@ -712,7 +738,7 @@ async function draw(day, picks, pts, seq, plan){
     <h2>${simple ? "🅿️ เลือกจุดแวะ" : "จุดแวะระหว่างทาง (เลือกได้มากกว่า 1 จุด)"}</h2>
     ${simple ? `<p class="meta" style="margin:0 0 8px">ติ๊กจุดที่อยากแวะ เวลาและเส้นทางจะอัปเดตให้เอง</p>` : ""}
     ${stopsHtml || "<div class='meta'>ยังไม่มีจุดแวะ</div>"}
-    ${simple ? `<div class="row"><button class="b p" data-act="addstop">＋ เพิ่มจุดแวะ</button></div>` : ""}
+    <div class="row"><button class="b p" data-act="addstop">＋ เพิ่มจุดแวะ</button><button class="b" data-act="addbreak">☕ แทรกเวลาพัก</button></div>
   </div>
 
   <!--C:sum-->
@@ -800,7 +826,7 @@ async function draw(day, picks, pts, seq, plan){
 
   // จัดหน้าตามโหมด: แบบเต็ม = ทุกการ์ดเหมือนเดิม · แบบง่าย = ภาพรวม + จุดแวะ + ตารางเวลา ส่วนที่เหลือรวมไว้ใต้ "เครื่องมือเพิ่มเติม"
   const parts = {}; { const a = html.split(/<!--C:(\w+)-->/); for (let i = 1; i < a.length; i += 2) parts[a[i]] = a[i+1]; }
-  const modebar = `<div class="modebar"><div class="seg"><button data-ui="simple" class="${simple ? "on" : ""}">🙂 แบบง่าย</button><button data-ui="full" class="${simple ? "" : "on"}">🔧 แบบเต็ม</button></div><button class="b" id="helpBtn">❓ วิธีใช้</button></div>`;
+  const modebar = `<div class="modebar"><div class="seg"><button data-ui="simple" class="${simple ? "on" : ""}">🙂 แบบง่าย</button><button data-ui="full" class="${simple ? "" : "on"}">🔧 แบบเต็ม</button></div><span style="display:flex;gap:6px"><button class="b ${showLabels ? "p" : ""}" id="lblBtn">🏷 ชื่อบนแผนที่</button><button class="b" id="helpBtn">❓</button></span></div>`;
   let out;
   if (!simple) out = modebar + ["hero", "sched", "stops", "sum", "veh", "rec", "share", "adv"].map(k => parts[k] || "").join("");
   else {
@@ -849,6 +875,9 @@ async function draw(day, picks, pts, seq, plan){
     ls.set("trip.veh.v1", veh); update();
   });
   document.querySelectorAll("[data-en]").forEach(b => b.onclick = e => { e.stopPropagation(); openEnergy(b.dataset.en); });
+  document.querySelectorAll("[data-edit]").forEach(b => b.onclick = e => { e.stopPropagation(); openPlaceEditor(b.dataset.edit); });
+  if ($("#dayNoteBtn")) $("#dayNoteBtn").onclick = openDayNote;
+  if ($("#lblBtn")) $("#lblBtn").onclick = () => { showLabels = !showLabels; ls.set("trip.maplabels.v1", showLabels); update(); };
   document.querySelectorAll("[data-del]").forEach(b => b.onclick = e => { e.stopPropagation(); if (confirm("ลบจุดแวะนี้?")) dropStop(+b.dataset.del); });
   document.querySelectorAll("[data-d]").forEach(el => el.onchange = () => { trip.days[cur][el.dataset.d] = el.value; saveTrip(); renderTabs(); });
   document.querySelectorAll("[data-act]").forEach(b => b.onclick = () => act(b.dataset.act));
@@ -962,6 +991,7 @@ function act(a){
   else if (a === "addvia") openPicker("เพิ่มจุดหมายหลัก (ที่ต้องไป)", p => {
     day.vias = day.vias || []; day.vias.push(Object.assign(place(p), { stay: 0, note: "" })); saveTrip(); recMem = {}; load(); });
   else if (a === "addday") addDay();
+  else if (a === "addbreak") openBreakModal();
   else if (a === "delday") delDay();
 }
 
@@ -980,6 +1010,77 @@ function openHelp(){
     <div class="meta">แบบง่ายแสดงเฉพาะที่ใช้บ่อย ส่วนแบบเต็มมีทุกเครื่องมือ สลับได้ที่ปุ่มด้านบนของแผง</div>
     <div class="row" style="margin-top:12px"><button class="b p" id="hx">ปิด</button></div></div>`;
   $("#hx").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
+}
+
+/* ---------- แก้ไขรายละเอียดของแต่ละจุด / แทรกเวลาพัก / โน้ตของวัน ---------- */
+function openPlaceEditor(ref){
+  const day = trip.days[cur], p = getPlaceRef(day, ref); if (!p) return;
+  const [kind, idx] = ref.split(":"), i = +idx;
+  const hasStay = kind === "stop" || kind === "via", canDel = kind === "stop" || kind === "via" || kind === "lodging";
+  const stayVal = kind === "stop" ? stayOf(i) : Number(p.stay || 0);
+  const title = { start:"จุดเริ่มต้น", end:"ปลายทางสุดท้าย", lodging:"ที่พักคืนนี้", via:"จุดหมายหลัก", stop:"จุดแวะ" }[kind];
+  const m = $("#modal"); m.hidden = false;
+  m.innerHTML = `<div class="mbox"><h2>✏️ ${title}</h2>
+    <label class="meta" style="display:block">ชื่อที่แสดง<input class="f" id="pename" value="${esc(p.name)}" maxlength="100"></label>
+    ${hasStay ? `<label class="meta" style="display:block;margin-top:8px">เวลาที่ใช้ที่จุดนี้ (นาที)<input class="f" id="pestay" type="number" min="0" step="5" inputmode="numeric" value="${stayVal}"></label>` : ""}
+    <label class="meta" style="display:block;margin-top:8px">โน้ต (แสดงในรายการ ตารางเวลา และบนแผนที่)<textarea class="f" id="penote" maxlength="300" style="height:90px" placeholder="เช่น จองโต๊ะไว้ 12:00 / ของฝากต้องซื้อ / ห้ามลืมกล้อง">${esc(p.note || "")}</textarea></label>
+    <div class="row">
+      <button class="b p" id="pesave">บันทึก</button>
+      ${hasStay || kind === "lodging" ? `<button class="b" id="peen">⚡⛽ จุดเติม/ชาร์จ</button>` : ""}
+      ${canDel ? `<button class="b" id="pedel" style="color:var(--red)">🗑 ลบจุดนี้</button>` : ""}
+      <button class="b" id="pex">ปิด</button></div></div>`;
+  $("#pesave").onclick = () => {
+    p.name = ($("#pename").value.trim() || p.name).slice(0, 100);
+    p.note = $("#penote").value.slice(0, 300);
+    if (hasStay){
+      const n = Math.max(0, +$("#pestay").value || 0);
+      if (kind === "stop"){ stays[cur + "_" + i] = n; ls.set("trip.stay.v1", stays); } else p.stay = n;
+    }
+    saveTrip(); closeModal(); update();
+  };
+  if ($("#peen")) $("#peen").onclick = () => { closeModal(); openEnergy(ref); };
+  if ($("#pedel")) $("#pedel").onclick = () => {
+    if (!confirm("ลบ \"" + p.name + "\" ออกจากแผน?")) return;
+    closeModal();
+    if (kind === "stop") dropStop(i); else if (kind === "via") dropVia(i); else { delete day.lodging; saveTrip(); recMem = {}; load(); }
+  };
+  $("#pex").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
+}
+function openDayNote(){
+  const day = trip.days[cur], m = $("#modal"); m.hidden = false;
+  m.innerHTML = `<div class="mbox"><h2>📝 โน้ตของวันนี้</h2>
+    <textarea class="f" id="dnote" maxlength="300" style="height:120px" placeholder="เช่น วันนี้เน้นพักผ่อน / นัดกินข้าวกับญาติ / เช็กอินโรงแรมหลัง 15:00">${esc(day.note || "")}</textarea>
+    <div class="row"><button class="b p" id="dnsave">บันทึก</button><button class="b" id="dnx">ปิด</button></div></div>`;
+  $("#dnote").focus();
+  $("#dnsave").onclick = () => { day.note = $("#dnote").value.slice(0, 300); saveTrip(); closeModal(); update(); };
+  $("#dnx").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
+}
+// แทรกเวลาพัก: สร้างจุดพักบนเส้นทางตามตำแหน่งที่เลือก (ไม่ต้องหาสถานที่) พร้อมเวลาและโน้ต
+function openBreakModal(){
+  if (!curSeq || !routeData || curSeq.length < 2) return;
+  const seq = curSeq, legs = routeData.legs, day = trip.days[cur], m = $("#modal"); m.hidden = false;
+  const opts = legs.map((l, k) => `<option value="${k}">หลัง ${esc(seq[k].p.name)} → ${esc(seq[k+1].p.name)} (ช่วง ${fmtKm(l.distance)})</option>`).join("");
+  m.innerHTML = `<div class="mbox"><h2>☕ แทรกเวลาพัก</h2>
+    <p class="meta" style="margin:2px 0 8px">เพิ่มจุดพักระหว่างทาง เช่น พักทานข้าว เข้าห้องน้ำ ถ่ายรูป โดยระบุตำแหน่งและเวลา ระบบจะรวมเข้าตารางเวลาให้</p>
+    <label class="meta" style="display:block">ตำแหน่ง<select class="f" id="bkafter">${opts}</select></label>
+    <div class="vgrid" style="margin-top:8px">
+      <label>ห่างจากจุดนั้นไปอีก (กม.)<input class="f" id="bkkm" type="number" min="0" step="1" inputmode="decimal"></label>
+      <label>เวลาพัก (นาที)<input class="f" id="bkmin" type="number" min="0" step="5" inputmode="numeric" value="30"></label>
+      <label style="grid-column:1/-1">ชื่อจุดพัก<input class="f" id="bklabel" value="พักรถ" maxlength="60"></label>
+      <label style="grid-column:1/-1">โน้ต (ไม่บังคับ)<input class="f" id="bknote" maxlength="200" placeholder="เช่น ร้านข้าวแกงริมทาง"></label>
+    </div>
+    <div class="row"><button class="b p" id="bksave">เพิ่มจุดพัก</button><button class="b" id="bkx">ปิด</button></div></div>`;
+  const setDefault = () => { const l = legs[+$("#bkafter").value]; $("#bkkm").value = Math.round(l.distance / 2000); };
+  setDefault(); $("#bkafter").onchange = setDefault;
+  $("#bksave").onclick = () => {
+    const k = +$("#bkafter").value, pos = seqPositions(legs), km = Math.max(0, +$("#bkkm").value || 0);
+    const d = Math.min(pos[k+1] - 50, pos[k] + km * 1000), pt = pointAt(routePath(curPts), Math.max(pos[k] + 1, d));
+    const name = "☕ " + ($("#bklabel").value.trim() || "พักรถ");
+    day.stops.push({ name, lat: +pt.lat.toFixed(6), lng: +pt.lng.toFixed(6), stay: Math.max(0, +$("#bkmin").value || 0), note: $("#bknote").value.slice(0, 200), rest: true });
+    sel[cur] = sel[cur] || {}; sel[cur][day.stops.length - 1] = true;
+    ls.set(LS.sel, sel); saveTrip(); closeModal(); load();
+  };
+  $("#bkx").onclick = closeModal; m.onclick = e => { if (e.target === m) closeModal(); };
 }
 
 /* ---------- ป้ายจุดเติม/ชาร์จของแต่ละจุด ---------- */
@@ -1377,7 +1478,7 @@ function showRec(){
           <div class="meta">${p.prov ? "📍 จ." + esc(p.prov) + " · " : ""}${p.addr ? esc(p.addr) + " · " : ""}กม.ที่ ${(p.along/1000).toFixed(0)} · ห่างเส้นทาง ~${(p.off/1000).toFixed(1)} กม.</div>
           ${p.extra ? `<div class="meta">${esc(p.extra)}</div>` : ""}
           <div style="margin-top:4px"><a target="_blank" rel="noopener" href="${esc(link)}">ดูรีวิว/นำทาง</a> ·
-          ${added ? `<span class="meta">✓ เพิ่มเป็นจุดแวะแล้ว</span>` : `<button class="b" data-rec="${i}" style="padding:2px 10px">＋ เพิ่มเป็นจุดแวะ</button>`}</div>
+          ${added ? `<span class="meta">✓ เพิ่มเป็นจุดแวะแล้ว</span> <button class="b" data-unrec="${i}" style="padding:2px 10px">เอาออก</button>` : `<button class="b" data-rec="${i}" style="padding:2px 10px">＋ เพิ่มเป็นจุดแวะ</button>`}</div>
         </div></div>`;
       if (MAP) MAP.marker({ lat:p.lat, lng:p.lng, label:c.ico, color:c.color, tag:"rec",
         popup: popEl(`<b>${esc(p.name)}</b>${p.rating ? `<br>★ ${p.rating.toFixed(1)} (${p.n} รีวิว)` : ""}<br><a target="_blank" rel="noopener" href="${esc(link)}">ดูรีวิว/นำทาง</a>`) });
@@ -1397,6 +1498,9 @@ function showRec(){
   if ($("#recNext")) $("#recNext").onclick = goPage(1);
   const go = $("#recGo"); if (go) go.onclick = () => runRec(recCat, true);
   const rt = $("#recRetry"); if (rt) rt.onclick = e => { e.preventDefault(); runRec(recCat, true); };
+  box.querySelectorAll("[data-unrec]").forEach(b => b.onclick = () => {
+    const p = slot.items[+b.dataset.unrec], idx = day.stops.findIndex(s => hav(s, p) < 60); if (idx >= 0) dropStop(idx);
+  });
   box.querySelectorAll("[data-rec]").forEach(b => b.onclick = () => {
     const p = slot.items[+b.dataset.rec];
     addStop(p, { note: p.rating ? "★ " + p.rating.toFixed(1) : "" });
@@ -1427,6 +1531,7 @@ function cleanPlace(p){
   if (lat === null || lng === null || Math.abs(lat) > 90 || Math.abs(lng) > 180) return null;
   const out = { name: str(p.name, 100) || "ไม่ระบุชื่อ", lat, lng }, en = cleanEnergy(p.energy);
   if (en) out.energy = en;
+  if (p.note) out.note = str(p.note, 300);
   return out;
 }
 // ล้างข้อมูลที่รับมาจากภายนอก (ไฟล์/ลิงก์/JSON) ให้เป็นรูปแบบที่ปลอดภัย
@@ -1440,14 +1545,14 @@ function cleanTrip(t){
     const stops = [];
     for (const x of arr(d.stops).slice(0, 100)){
       const p = cleanPlace(x); if (!p) return null;
-      p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 200); stops.push(p);
+      p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 300); if (x.rest) p.rest = true; stops.push(p);
     }
     const vias = [];
     for (const x of arr(d.vias).slice(0, 20)){
       const p = cleanPlace(x); if (!p) return null;
-      p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 200); vias.push(p);
+      p.stay = Math.max(0, numOrNull(x.stay) || 0); p.note = str(x.note, 300); vias.push(p);
     }
-    days.push({ label: str(d.label, 60), date: /^\d{4}-\d{2}-\d{2}$/.test(d.date) ? d.date : "",
+    days.push({ label: str(d.label, 60), note: str(d.note, 300), date: /^\d{4}-\d{2}-\d{2}$/.test(d.date) ? d.date : "",
       depart: /^\d{2}:\d{2}$/.test(d.depart) ? d.depart : "", fill: d.fill === "full" || d.fill === "keep" ? d.fill : "auto", start: s, end: e, vias, stops });
     if (d.lodging){ const lp = cleanPlace(d.lodging); if (lp) days[days.length-1].lodging = lp; }
   }
@@ -2090,7 +2195,8 @@ function openSettings(){
 
 /* ---------- แผนที่ (Leaflet ฟรี หรือ Google Maps) ---------- */
 let MAP = null, mapP = null, mapNote = "", mapForceOsm = false, mapPref = ls.get("trip.map.v1", "osm");
-const pinHtml = (txt, color) => `<div class="pin" style="background:${color}">${txt}</div>`;
+let showLabels = ls.get("trip.maplabels.v1", true);      // แสดงชื่อสถานที่ข้างหมุดบนแผนที่
+const pinHtml = (txt, color, name) => `<div class="pinwrap"><div class="pin" style="background:${color}">${txt}</div>${name && showLabels ? `<span class="plabel">${esc(name)}</span>` : ""}</div>`;
 function popEl(html, bind){ const d = document.createElement("div"); d.innerHTML = html; if (bind) bind(d); return d; }
 
 const LMap = {
@@ -2115,7 +2221,7 @@ const LMap = {
   },
   resize(){ try{ this.m.invalidateSize(); }catch(e){} },
   marker(o){
-    const mk = L.marker([o.lat, o.lng], { icon: L.divIcon({ className:"", iconSize:[28,28], iconAnchor:[14,14], html: pinHtml(o.label, o.color) }), zIndexOffset: o.z || 0 }).addTo(this.m);
+    const mk = L.marker([o.lat, o.lng], { icon: L.divIcon({ className:"", iconSize:[28,28], iconAnchor:[14,14], html: pinHtml(o.label, o.color, o.name) }), zIndexOffset: o.z || 0 }).addTo(this.m);
     if (o.popup) mk.bindPopup(o.popup);
     this.objs.push({ tag:o.tag, o:mk });
   },
@@ -2168,7 +2274,7 @@ const GMap = {
   resize(){ try{ google.maps.event.trigger(this.m, "resize"); }catch(e){} },
   setTheme(){ try{ this.m.setOptions({ colorScheme: this.scheme() }); }catch(e){} },
   marker(o){
-    const c = document.createElement("div"); c.innerHTML = pinHtml(o.label, o.color);
+    const c = document.createElement("div"); c.innerHTML = pinHtml(o.label, o.color, o.name);
     const content = c.firstChild; content.style.transform = "translateY(50%)";
     const mk = new google.maps.marker.AdvancedMarkerElement({ map:this.m, position:{ lat:o.lat, lng:o.lng }, content, zIndex:o.z || 0 });
     if (o.popup) mk.addListener("click", () => { this.iw.setContent(o.popup); this.iw.open({ map:this.m, anchor:mk }); });
@@ -2212,16 +2318,16 @@ function drawMapBody(day, picks, seq){
     MAP.line(seq.map(x => x.p), { color:"#0f766e", weight:4, dash:true, tag:"route" });
   }
   seq.forEach((x, k) => {
-    if (x.kind === "start") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"▶", color:"#16a34a", z:500, tag:"route", popup:popEl("<b>เริ่มต้น</b><br>" + esc(x.p.name)) });
-    else if (x.kind === "end") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"⚑", color:"#dc2626", z:500, tag:"route", popup:popEl("<b>ปลายทางสุดท้าย</b><br>" + esc(x.p.name)) });
-    else if (x.kind === "lodging") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"🛏", color:"#4f46e5", z:480, tag:"route", popup:popEl("<b>ที่พักคืนนี้</b><br>" + esc(x.p.name)) });
-    else if (x.kind === "via") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"★", color:"#9333ea", z:450, tag:"route",
-      popup:popEl("<b>จุดหมายหลัก</b><br>" + esc(x.p.name) + (x.p.stay ? "<br>อยู่ " + Number(x.p.stay) + " นาที" : "")) });
+    if (x.kind === "start") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"▶", color:"#16a34a", z:500, tag:"route", name:x.p.name, popup:popEl("<b>เริ่มต้น</b><br>" + esc(x.p.name) + noteHtml(x.p)) });
+    else if (x.kind === "end") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"⚑", color:"#dc2626", z:500, tag:"route", name:x.p.name, popup:popEl("<b>ปลายทางสุดท้าย</b><br>" + esc(x.p.name) + noteHtml(x.p)) });
+    else if (x.kind === "lodging") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"🛏", color:"#4f46e5", z:480, tag:"route", name:x.p.name, popup:popEl("<b>ที่พักคืนนี้</b><br>" + esc(x.p.name) + noteHtml(x.p)) });
+    else if (x.kind === "via") MAP.marker({ lat:x.p.lat, lng:x.p.lng, label:"★", color:"#9333ea", z:450, tag:"route", name:x.p.name,
+      popup:popEl("<b>จุดหมายหลัก</b><br>" + esc(x.p.name) + (x.p.stay ? "<br>อยู่ " + Number(x.p.stay) + " นาที" : "") + noteHtml(x.p)) });
   });
   day.stops.forEach((s, i) => {
     const n = picks.indexOf(i), on = n >= 0, t = T.info[i];
-    MAP.marker({ lat:s.lat, lng:s.lng, label: on ? n+1 : "•", color: on ? "#2563eb" : "#8a8f94", tag:"route",
-      popup: popEl(`<b>${esc(s.name)}</b><br>${T.M > 2 ? "จาก " + esc(mains[t.leg].name) + " " : ""}${fmtKm(t.distance)} · ${fmtDur(t.duration)}<br><a href="#" data-t="${i}">${on ? "เอาออก" : "เลือกจุดนี้"}</a>
+    MAP.marker({ lat:s.lat, lng:s.lng, label: on ? n+1 : "•", color: on ? "#2563eb" : "#8a8f94", tag:"route", name: on ? s.name : "",
+      popup: popEl(`<b>${esc(s.name)}</b>${noteHtml(s)}<br>${T.M > 2 ? "จาก " + esc(mains[t.leg].name) + " " : ""}${fmtKm(t.distance)} · ${fmtDur(t.duration)}<br><a href="#" data-t="${i}">${on ? "เอาออก" : "เลือกจุดนี้"}</a>
         · <a target="_blank" rel="noopener" href="https://www.google.com/maps/dir/?api=1&destination=${s.lat},${s.lng}">นำทาง</a>`,
         d => { const a = d.querySelector("[data-t]"); if (a) a.onclick = ev => { ev.preventDefault(); MAP.closePopup(); toggle(i); }; }) });
     all.push(s);
