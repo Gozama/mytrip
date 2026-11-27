@@ -164,7 +164,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-28-w";
+const APP_VER = "2026-11-28-x";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -331,7 +331,7 @@ function planFuel(total, startOverride, kp = []){
     const pick = fuelPicks[pk];                                     // ปั๊ม/สถานีจริงที่ค้นเจอแล้ว (เลือกให้เหลือระยะ 30–50 กม.)
     const st = (pick && pick.along > base + 1 && pick.along <= hardEnd + 1) ? pick : null;
     const at = st ? Math.min(st.along, hardEnd) : nominal;
-    const from = Math.max(base, Math.min(nominal, emptyAt - FUEL_RES_FAR));
+    const from = Math.max(base, Math.min(nominal, emptyAt - 100000));
     events.push({ alertAt: at, emptyAt, win: st ? [at, at] : [from, hardEnd], station: st, pk, before: nk ? nk.name : null });
     base = at; avail = full;                // สมมติว่าเติมเต็ม ณ จุดที่แนะนำ
   }
@@ -393,24 +393,36 @@ async function overpass(q, ms = 20000){
   return null;
 }
 async function findStations(sp, ev, path, from, to){
-  const key = "O|" + ev + "|" + sp.map(p => p.lat.toFixed(3)+","+p.lng.toFixed(3)).join(";");
+  const key = "O2|" + ev + "|" + sp.map(p => p.lat.toFixed(3)+","+p.lng.toFixed(3)).join(";");
   if (cache[key]) return cache[key];
   if (failUntil[key] > Date.now()) return null;
   const tag = ev ? "charging_station" : "fuel";
-  const q = `[out:json][timeout:25];nwr["amenity"="${tag}"](around:3000,${sp.map(p => p.lat.toFixed(5)+","+p.lng.toFixed(5)).join(",")});out center 80;`;
-  const els = await overpass(q); if (!els){ failUntil[key] = Date.now() + 5 * 60 * 1000; return null; }
-  const list = els.map(e => {
-    const lat = e.lat ?? e.center?.lat, lng = e.lon ?? e.center?.lon; if (lat == null) return null;
+  const mine = (lat, lng, extra) => {
     let best = null, bd = 1e12;
     for (const p of path){ const d = hav(p, { lat, lng }); if (d < bd){ bd = d; best = p; } }
+    return Object.assign({ lat, lng, along: best.cum, off: bd }, extra);
+  };
+  const inWin = s => s && s.off <= 6000 && s.along >= from - 2000 && s.along <= to + 1000;
+  const q = `[out:json][timeout:25];nwr["amenity"="${tag}"](around:5000,${sp.map(p => p.lat.toFixed(5)+","+p.lng.toFixed(5)).join(",")});out center 120;`;
+  const els = await overpass(q);
+  let list = els ? els.map(e => {
+    const lat = e.lat ?? e.center?.lat, lng = e.lon ?? e.center?.lon; if (lat == null) return null;
     const t = e.tags || {};
-    return { lat, lng, along: best.cum, off: bd, name: t.name || t["name:th"] || t.brand || t.operator || (ev ? "สถานีชาร์จ" : "ปั๊มน้ำมัน"),
-             sub: [t.brand, t.operator, t.network].filter((v, i, a) => v && a.indexOf(v) === i).join(" · "), cap: t.capacity };
-  }).filter(s => s && s.along >= from - 2000 && s.along <= to + 1000)
-    .sort((a, b) => a.along - b.along);
-  // ตัดซ้ำที่อยู่ใกล้กันมาก แล้วเก็บไม่เกิน 8 แห่ง
+    return mine(lat, lng, { name: t.name || t["name:th"] || t.brand || t.operator || (ev ? "สถานีชาร์จ" : "ปั๊มน้ำมัน"),
+             sub: [t.brand, t.operator, t.network].filter((v, i, a) => v && a.indexOf(v) === i).join(" · "), cap: t.capacity });
+  }).filter(inWin) : [];
+  if (!list.length && gkey && googleAllowed()){       // OpenStreetMap ไม่มีข้อมูล → ลองถาม Google (นับเข้าโควต้า)
+    try{
+      const mid = [sp[0], sp[Math.floor(sp.length / 2)], sp[sp.length - 1]].filter((v, i, a) => a.indexOf(v) === i);
+      const got = (await Promise.all(mid.map(c => gSearch(ev ? "สถานีชาร์จรถยนต์ไฟฟ้า EV charging station" : "ปั๊มน้ำมัน gas station", c, 30000, 0)))).flat(), seen = new Set();
+      list = got.filter(x => x.location && !seen.has(x.googleMapsUri) && seen.add(x.googleMapsUri))
+        .map(x => mine(x.location.latitude, x.location.longitude, { name: x.displayName?.text || (ev ? "สถานีชาร์จ" : "ปั๊มน้ำมัน"), sub: "Google", uri: x.googleMapsUri })).filter(inWin);
+    }catch(e){}
+  }
+  if (!els && !list.length){ failUntil[key] = Date.now() + 5 * 60 * 1000; return null; }
+  list.sort((a, b) => a.along - b.along);
   const out = []; list.forEach(s => { if (!out.some(o => hav(o, s) < 80)) out.push(s); });
-  cache[key] = out.slice(0, 8); saveCache();
+  cache[key] = out.slice(0, 12); saveCache();
   return cache[key];
 }
 async function renderFuel(day, pts, plan){
@@ -442,7 +454,7 @@ async function renderFuel(day, pts, plan){
     if (MAP) MAP.marker({ lat:a.lat, lng:a.lng, label:"!", color:"#ea580c", z:300, tag:"fuel",
       popup: popEl(`<b>จุดเริ่มแนะนำ${ev?"ชาร์จ":"เติมน้ำมัน"}</b><br>ครั้งที่ ${i+1} · กม.ที่ ${(e.alertAt/1000).toFixed(0)}`) });
     if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (เซิร์ฟเวอร์ตอบช้าหรือไม่มีอินเทอร์เน็ต) <button class="b" data-fretry style="padding:2px 8px">🔄 ลองใหม่</button> — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
-    else if (!list.length) html += `<div class="warn">ไม่พบ${word}ในช่วงนี้ในแผนที่ OpenStreetMap — <a target="_blank" rel="noopener" href="${gm}">ลองค้นใน Google Maps</a></div>`;
+    else if (!list.length) html += `<div class="warn">ไม่พบ${word}ในช่วงนี้ (OpenStreetMap${gkey ? "/Google" : " — ใส่ Google key ใน ⚙️ จะค้นได้ครบขึ้น"}) — <a target="_blank" rel="noopener" href="${gm}">ลองค้นใน Google Maps</a></div>`;
     else {
       const k0 = evKey(e, path).key; if (list[0]){ evStations[k0] = list[0].name; document.querySelectorAll("[data-evstn]").forEach(el => { if (el.dataset.evstn === k0) el.textContent = "เช่น " + list[0].name + " · "; }); }
       list.forEach(s => {
