@@ -164,7 +164,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-28-v";
+const APP_VER = "2026-11-28-w";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -273,11 +273,16 @@ function evKey(e, path){
 }
 function evKmText(e){ const x = (e.alertAt/1000).toFixed(0), y = (e.win[1]/1000).toFixed(0); return x === y ? "ประมาณกม.ที่ " + x : "ช่วงกม.ที่ " + x + "–" + y; }
 const evStations = {};
-function evStn(e, path){      // ชื่อปั๊ม/สถานีชาร์จตัวอย่างในช่วงนั้น (ขึ้นเมื่อค้นเจอ)
+function evStn(e, path){
+  if (e.station) return "";      // ชื่อปั๊ม/สถานีชาร์จตัวอย่างในช่วงนั้น (ขึ้นเมื่อค้นเจอ)
   const k = evKey(e, path).key;
   return `<span data-evstn="${esc(k)}">${evStations[k] ? "เช่น " + esc(evStations[k]) + " · " : ""}</span>`;
 }
-function evLoc(e, path){       // ข้อความตำแหน่งจุดเติม: ใช้ชื่ออำเภอ/จังหวัดถ้ามีแล้ว ไม่งั้นแสดงกม.ไปก่อน แล้วค่อยเปลี่ยนเมื่อได้ชื่อ
+function evLoc(e, path){
+  if (e.station){ const k = evKey(e, path); return `<b>${esc(e.station.name)}</b> <span data-evloc="${esc(k.key)}">${esc(evLabels[k.key] || "กม.ที่ " + (e.station.along/1000).toFixed(0))}</span> · เหลือพลังงานเมื่อถึง ~${Math.max(0, Math.round((e.emptyAt - e.station.along)/1000))} กม.`; }
+  return evLocApprox(e, path);
+}
+function evLocApprox(e, path){       // ข้อความตำแหน่งจุดเติม: ใช้ชื่ออำเภอ/จังหวัดถ้ามีแล้ว ไม่งั้นแสดงกม.ไปก่อน แล้วค่อยเปลี่ยนเมื่อได้ชื่อ
   const k = evKey(e, path);
   return `<span data-evloc="${esc(k.key)}" title="${esc(evKmText(e))}">${esc(evLabels[k.key] || evKmText(e))}</span>`;
 }
@@ -294,6 +299,14 @@ async function resolveEvLabels(events, path){
 // วางแผนว่าจะต้องเติม/ชาร์จที่ระยะกี่เมตรของเส้นทาง
 // startOverride = พลังงานที่เหลือตอนออกเดินทาง (เมตร) ถ้าไม่ระบุ ใช้ % ที่กรอก (ไม่กรอก = เต็ม)
 // kp = จุดเติม/ชาร์จที่ผู้ใช้รู้แล้วบนเส้นทาง [{pos, e, pct, name, kind}] — ถึงจุดนั้นก่อนหมด ไม่ต้องแนะนำปั๊มอื่น
+const FUEL_RES_NEAR = 30000, FUEL_RES_FAR = 50000, fuelPicks = {};
+// เลือกปั๊ม/สถานีจริงจากรายการ: ให้เหลือระยะวิ่งตอนถึง 30–50 กม. (ไกลสุดในช่วงนี้) ถ้าไม่มี เอาที่ไกลสุดก่อนช่วง 50 กม. ถ้ายังไม่มี เอาที่ใกล้สุดที่ยังถึงได้
+function pickStation(list, emptyAt){
+  const left = s => emptyAt - s.along, inBand = list.filter(s => left(s) >= FUEL_RES_NEAR && left(s) <= FUEL_RES_FAR);
+  if (inBand.length) return inBand.reduce((a, b) => b.along > a.along ? b : a);
+  const early = list.filter(s => left(s) > FUEL_RES_FAR); if (early.length) return early.reduce((a, b) => b.along > a.along ? b : a);
+  const late = list.filter(s => left(s) >= 0); return late.length ? late.reduce((a, b) => b.along < a.along ? b : a) : null;
+}
 function planFuel(total, startOverride, kp = []){
   const full = (Number(veh.range) || 0)*1000, warnLeft = (Number(veh.warn) || 0)*1000;
   const startAvail = (startOverride != null) ? Math.min(full, Math.max(0, startOverride)) : full*(Number(veh.level) || 100)/100;
@@ -313,9 +326,14 @@ function planFuel(total, startOverride, kp = []){
       base = nk.pos; avail = Math.min(full, full * nk.pct / 100) - half; ki++;
       continue;
     }
-    const at = Math.min(alertAt, Math.max(base, segEnd - 1));
-    events.push({ alertAt: at, emptyAt: base + avail, win:[at, Math.min(base + avail, segEnd)], before: nk ? nk.name : null });
-    base = at; avail = full;                // สมมติว่าเติมเต็ม ณ จุดแนะนำ
+    const nominal = Math.min(alertAt, Math.max(base, segEnd - 1)), emptyAt = base + avail, hardEnd = Math.min(emptyAt, segEnd);
+    const pk = [cur, veh.type, Math.round(total/100), Math.round(base/100), Math.round(avail/100)].join("|");
+    const pick = fuelPicks[pk];                                     // ปั๊ม/สถานีจริงที่ค้นเจอแล้ว (เลือกให้เหลือระยะ 30–50 กม.)
+    const st = (pick && pick.along > base + 1 && pick.along <= hardEnd + 1) ? pick : null;
+    const at = st ? Math.min(st.along, hardEnd) : nominal;
+    const from = Math.max(base, Math.min(nominal, emptyAt - FUEL_RES_FAR));
+    events.push({ alertAt: at, emptyAt, win: st ? [at, at] : [from, hardEnd], station: st, pk, before: nk ? nk.name : null });
+    base = at; avail = full;                // สมมติว่าเติมเต็ม ณ จุดที่แนะนำ
   }
   const last = known[known.length - 1], endsAtKnown = last && Math.abs(last.pos - total) < 2;
   if (endsAtKnown) remain = last.remain;
@@ -407,15 +425,20 @@ async function renderFuel(day, pts, plan){
       → ${ev ? "ชาร์จ" : "เติม"}ถึง ${k.pct}%${k.low ? ` <span class="warn">(ต่ำกว่าเกณฑ์ที่ตั้งไว้ ถึงแบบหวุดหวิด)</span>` : ""}</div>`).join("");
   if (!plan.events.length){ box.innerHTML = head + knownHtml + `<div class="meta">✅ รถวิ่งถึงปลายทางได้โดยไม่ต้อง${ev?"ชาร์จ":"เติมน้ำมัน"}ระหว่างทาง</div>`; return; }
   box.innerHTML = head + knownHtml + `<div class="meta">กำลังค้นหา${word}ตามเส้นทาง…</div>`;
-  const stnList = [];
+  const stnList = []; let changed = false;
   let html = head + knownHtml;
   for (let i = 0; i < plan.events.length; i++){
     const e = plan.events[i], a = pointAt(path, e.alertAt);
     const sp = samplePath(path, e.win[0], e.win[1]);
-    const list = await findStations(sp, ev, path, e.win[0], e.win[1]);
+    let list = e.station ? [e.station] : await findStations(sp, ev, path, e.win[0], e.win[1]);
     if (my !== reqId) return;
+    if (!e.station && list && list.length){
+      const pk = pickStation(list.filter(x => x.along <= e.emptyAt), e.emptyAt);
+      if (pk){ list = [pk, ...list.filter(x => x !== pk)];
+        if (!e.station && (!fuelPicks[e.pk] || Math.abs(fuelPicks[e.pk].along - pk.along) > 300)){ fuelPicks[e.pk] = pk; changed = true; } }
+    }
     const gm = `https://www.google.com/maps/search/${encodeURIComponent(ev ? "EV charging station" : "gas station")}/@${a.lat},${a.lng},12z`;
-    html += `<div class="evh">ครั้งที่ ${i+1}${e.before ? " (ก่อนถึง " + esc(e.before) + ")" : ""}: ควร${ev ? "ชาร์จ" : "เติม"} ${evLoc(e, path)}${e.emptyAt > routeData.distance ? "" : " (ก่อนพลังงานหมด)"}</div>`;
+    html += `<div class="evh">ครั้งที่ ${i+1}${e.before ? " (ก่อนถึง " + esc(e.before) + ")" : ""}: ${e.station ? "แนะนำ" + (ev ? "ชาร์จ" : "เติม") + "ที่ " : "ควร" + (ev ? "ชาร์จ" : "เติม") + " "}${evLoc(e, path)}${e.emptyAt > routeData.distance ? "" : " (ก่อนพลังงานหมด)"}</div>`;
     if (MAP) MAP.marker({ lat:a.lat, lng:a.lng, label:"!", color:"#ea580c", z:300, tag:"fuel",
       popup: popEl(`<b>จุดเริ่มแนะนำ${ev?"ชาร์จ":"เติมน้ำมัน"}</b><br>ครั้งที่ ${i+1} · กม.ที่ ${(e.alertAt/1000).toFixed(0)}`) });
     if (list === null) html += `<div class="warn">ค้นหาอัตโนมัติไม่ได้ (เซิร์ฟเวอร์ตอบช้าหรือไม่มีอินเทอร์เน็ต) <button class="b" data-fretry style="padding:2px 8px">🔄 ลองใหม่</button> — <a target="_blank" rel="noopener" href="${gm}">ค้นหาใน Google Maps</a></div>`;
@@ -435,6 +458,7 @@ async function renderFuel(day, pts, plan){
     }
   }
   box.innerHTML = html;
+  if (changed){ setTimeout(() => { if (my === reqId) update(); }, 0); return; }      // ได้ปั๊ม/สถานีจริงแล้ว คำนวณตารางเวลาใหม่ให้ตรงตำแหน่ง
   box.querySelectorAll("[data-stn]").forEach(b => b.onclick = () => {      // เปลี่ยนจุดที่ระบบแนะนำให้เป็นจุดแวะจริง (มีชื่อ เวลา โน้ตของตัวเอง)
     const st = stnList[+b.dataset.stn];
     addStop(st, { stay: 0, note: "", energy: { type: ev ? "ev" : "fuel", pct: 100, mins: "", detourKm: 0, detourMin: 0, note: "" } });
@@ -704,7 +728,7 @@ async function draw(day, picks, pts, seq, plan){
 
   <!--C:sched-->
   <div class="card">
-    <h2>📅 กำหนดการของวันนี้ (รวมจุดแวะ)</h2>
+    <h2>📅 กำหนดการของวันนี้</h2>
     <div class="vgrid">
       <label>วันที่เดินทาง<input class="f" type="date" data-d="date" value="${esc(day.date || "")}"></label>
       <label>ชื่อวัน/หมายเหตุ<input class="f" data-d="label" value="${esc(day.label || "")}" placeholder="เช่น วันที่ 5 เหนือ"></label>
@@ -744,7 +768,7 @@ async function draw(day, picks, pts, seq, plan){
 
   <!--C:sum-->
   <div class="card">
-    <h2>สรุปแผนของวันนี้ (${picks.length} จุดแวะ)</h2>
+    <h2>📊 สรุปข้อมูลการเดินทาง (${picks.length} จุดแวะ)</h2>
     <div class="sum">
       <div><b>${fmtKm(routeData.distance + detourKm * 1000)}</b><span>ระยะทางรวม${detourKm ? " (รวมอ้อมไปจุดเติม " + detourKm + " กม.)" : ""}</span></div>
       <div><b>${fmtDur(routeData.duration)}</b><span>เวลาขับรถรวม</span></div>
@@ -755,8 +779,6 @@ async function draw(day, picks, pts, seq, plan){
       <div><b>${plan.remain == null ? "-" : Math.round(plan.remain/1000) + " กม."}</b><span>ระยะวิ่งคงเหลือเมื่อถึงปลายทาง</span></div>
       <div style="grid-column:1/-1"><b>${fmtDur(totalMin*60)}</b><span>รวมทั้งวัน (ขับ + แวะ + ${isEV ? "ชาร์จ" : "เติมน้ำมัน"})</span></div>
     </div>
-    ${plan.events.length ? `<div class="meta" style="margin-top:6px">* ตารางเวลาด้านล่างรวมเวลา${isEV ? "ชาร์จ" : "เติมน้ำมัน"}ที่ระบบแนะนำแล้ว (ตำแหน่งเป็นค่าประมาณ)</div>` : ""}
-    <ul class="tl">${tl}</ul>
   </div>
 
   <!--C:veh-->
@@ -816,22 +838,16 @@ async function draw(day, picks, pts, seq, plan){
   const modebar = `<div class="modebar"><div class="seg"><button data-ui="simple" class="${simple ? "on" : ""}">🙂 แบบง่าย</button><button data-ui="full" class="${simple ? "" : "on"}">🔧 แบบเต็ม</button></div><span style="display:flex;gap:6px"><button class="b ${showLabels ? "p" : ""}" id="lblBtn">🏷 ชื่อบนแผนที่</button><button class="b" id="helpBtn">❓</button></span></div>`;
   const syncBar = (sync && guest) ? syncBarHtml() : "";
   let out;
-  if (!simple) out = syncBar + modebar + ["hero", "sched", "sum", "veh", "rec", "adv"].map(k => parts[k] || "").join("");
-  else {
+  {
     const fuelLine = plan.unset ? "" : `<div class="meta" style="margin-top:8px">${isEV ? "⚡" : "⛽"} ${plan.events.length ? "ต้อง" + (isEV ? "ชาร์จ" : "เติมน้ำมัน") + " " + plan.events.length + " ครั้งระหว่างทาง (ดูใน เครื่องมือเพิ่มเติม)" : "ไม่ต้อง" + (isEV ? "ชาร์จ" : "เติมน้ำมัน") + "ระหว่างทาง"}</div>`;
-    const sumSimple = `<div class="card"><h2>📊 สรุปวันนี้</h2>
-      ${dep && finalArrive ? `<div class="route" style="font-size:18px;margin-bottom:8px">ออก ${esc(dep)} <span class="arrow">→</span> ถึง ${esc(finalArrive)}</div>` : `<div class="meta" style="margin-bottom:8px">ใส่เวลาออกเดินทางด้านบน เพื่อดูเวลาถึง</div>`}
-      <div class="sum">
-        <div><b>${fmtKm(routeData.distance + detourKm * 1000)}</b><span>ระยะทางรวม</span></div>
-        <div><b>${fmtDur(routeData.duration)}</b><span>เวลาขับรถ</span></div>
-        <div><b>${picks.length} จุด</b><span>จุดแวะที่เลือก</span></div>
-        <div><b>${fmtDur(totalMin*60)}</b><span>รวมทั้งวัน (ขับ+แวะ)</span></div>
-      </div>${fuelLine}</div>`;
-    const tlCard = `<div class="card"><h2>🕘 ตารางเวลาวันนี้</h2><ul class="tl" style="margin-top:0">${tl}</ul></div>`;
+    const evNote = `${plan.events.length ? `<div class="meta" style="margin-top:6px">* ตารางเวลานี้รวมเวลา${isEV ? "ชาร์จ" : "เติมน้ำมัน"}ที่ระบบแนะนำแล้ว (ตำแหน่งตามปั๊ม/สถานีจริงที่ค้นเจอ ถ้าค้นไม่เจอจะเป็นค่าประมาณ)</div>` : ""}`;
+    const arrLine = dep && finalArrive ? `<div class="route" style="font-size:18px;margin-bottom:8px">ออก ${esc(dep)} <span class="arrow">→</span> ถึง ${esc(finalArrive)}</div>` : `<div class="meta" style="margin-bottom:8px">ใส่เวลาออกเดินทางด้านบน เพื่อดูเวลาถึงแต่ละจุด</div>`;
+    const tlCard = `<div class="card"><h2>🕘 ตารางเวลาวันนี้</h2>${arrLine}<ul class="tl" style="margin-top:0">${tl}</ul>${evNote}${fuelLine}</div>`;
     const tips = tipsSeen ? "" : `<div class="card tip"><b>วิธีใช้ใน 3 ขั้นตอน</b><ol><li>เลือกวันจากแท็บด้านบน</li><li>ติ๊กจุดแวะที่อยากแวะ</li><li>ดูเวลาและเส้นทางในตารางเวลา และบนแผนที่</li></ol><button class="b p" id="tipsOk">เข้าใจแล้ว</button></div>`;
-    out = syncBar + modebar + tips + parts.hero + sumSimple + parts.sched + tlCard
-      + `<div class="card"><h2 id="extrasToggle" data-nofold data-open="${extrasOpen ? 1 : 0}" style="margin-bottom:-14px;border-radius:13px">🧰 เครื่องมือเพิ่มเติม <span style="font-weight:400;font-size:13px">รถ/ชาร์จ · แนะนำสถานที่</span></h2></div>`
-      + `<div id="extras" ${extrasOpen ? "" : "hidden"}>` + ["veh", "rec", "adv"].map(k => parts[k] || "").join("") + `</div>`;
+    const open = simple ? extrasOpen : true;
+    out = syncBar + modebar + (simple ? tips : "") + parts.hero + parts.sched + tlCard + parts.rec
+      + `<div class="card"><h2 id="extrasToggle" data-nofold data-open="${open ? 1 : 0}" style="margin-bottom:-14px;border-radius:13px">🧰 เครื่องมือเพิ่มเติม <span style="font-weight:400;font-size:13px">รถและการชาร์จ · สรุปข้อมูลการเดินทาง · แก้ไขข้อมูลทริป</span></h2></div>`
+      + `<div id="extras" ${open ? "" : "hidden"}>` + ["veh", "sum", "adv"].map(k => parts[k] || "").join("") + `</div>`;
   }
   $("#panel").innerHTML = out;
   bindSyncBar();
@@ -842,8 +858,8 @@ async function draw(day, picks, pts, seq, plan){
   if ($("#helpBtn")) $("#helpBtn").onclick = openHelp;
   if ($("#tipsOk")) $("#tipsOk").onclick = () => { tipsSeen = true; ls.set("trip.tips.v1", true); update(); };
   if ($("#extrasToggle")) $("#extrasToggle").onclick = e => {
-    extrasOpen = !extrasOpen; ls.set("trip.extras.v1", extrasOpen);
-    $("#extras").hidden = !extrasOpen; e.currentTarget.dataset.open = extrasOpen ? 1 : 0;
+    const nowOpen = $("#extras").hidden; if (simple) { extrasOpen = nowOpen; ls.set("trip.extras.v1", extrasOpen); }
+    $("#extras").hidden = !nowOpen; e.currentTarget.dataset.open = nowOpen ? 1 : 0;
   };
   // (ต่อด้านล่าง)
   document.querySelectorAll(".stop").forEach(el => el.onclick = e => toggle(+el.dataset.i));
