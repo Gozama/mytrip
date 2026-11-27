@@ -75,6 +75,11 @@ details summary{cursor:pointer;font-weight:600}
   background:rgba(255,255,255,.93);color:#222;padding:1px 6px;border-radius:6px;box-shadow:0 1px 3px rgba(0,0,0,.35);pointer-events:none}
 .card .note{font-size:13px;white-space:pre-wrap;margin-top:2px}
 .modebar{flex-wrap:wrap}
+.sec{border:1px solid var(--line);border-radius:12px;margin:10px 0;padding:0 12px}
+.sec>summary{cursor:pointer;font-weight:700;padding:11px 0;font-size:15px}
+.sec[open]>summary{border-bottom:1px solid var(--line);margin-bottom:8px}
+.sec[open]{padding-bottom:10px}
+.syncbar{border-left:6px solid var(--pri);padding:10px 14px}
 .modebar{display:flex;justify-content:space-between;align-items:center;gap:8px;margin-bottom:10px}
 .seg{display:flex;border:1px solid var(--line);border-radius:999px;overflow:hidden;background:var(--card)}
 .seg button{border:0;background:transparent;color:var(--ink);padding:8px 14px;font-size:14px;cursor:pointer}
@@ -159,7 +164,7 @@ body.nopanel #map{height:calc(100vh - 170px)!important;min-height:380px;position
    ======================================================================== */
 const DEFAULT_TRIP = { title: "", days: [] };
 
-const APP_VER = "2026-11-27-r";
+const APP_VER = "2026-11-27-t";
 const OSRM = "https://router.project-osrm.org";
 const LS = { trip: "trip.data.v1", sel: "trip.sel.v1", cache: "trip.cache.v1" };
 const $ = s => document.querySelector(s);
@@ -796,20 +801,6 @@ async function draw(day, picks, pts, seq, plan){
       ${guest ? "" : `· <a href="#" id="recSet">ตั้งค่า</a>`}</div>
   </div>
 
-  <!--C:share-->
-  <div class="card">
-    <h2>${guest ? "👨‍👩‍👧 แชร์ร่วมกัน" : "📤 แชร์และสำรองแผนทริป"}</h2>
-    ${guest ? `<p class="meta" style="margin:0 0 4px">ทุกคนในทริปเห็นและแก้แผนเดียวกัน ส่งลิงก์เชิญให้คนอื่นได้ที่ปุ่มด้านล่าง</p>` : `
-    <p class="meta" style="margin:0 0 4px">ส่งแผนนี้ให้คนอื่น หรือเก็บสำรองไว้ได้ ผู้รับกด "นำเข้าแผน" เพื่อเปิดแผนเดียวกัน (ไม่รวม API key)</p>
-    <div class="row">
-      <button class="b p" id="shLink">🔗 ส่งต่อ / คัดลอกลิงก์</button>
-      <button class="b" id="shFile">⬇️ ดาวน์โหลดไฟล์แผน</button>
-      <button class="b" id="shImp">⬆️ นำเข้าแผน</button>
-    </div>
-`}
-    <div class="row"><button class="b p" id="shSync" style="width:100%">👨‍👩‍👧 แชร์ร่วมกัน ${sync ? "🟢" : ""}</button></div>
-  </div>
-
   ${guest ? "" : `<!--C:adv-->
   <div class="card">
     <h2>✏️ แก้ไขข้อมูลทริป (ขั้นสูง)</h2>
@@ -827,8 +818,9 @@ async function draw(day, picks, pts, seq, plan){
   // จัดหน้าตามโหมด: แบบเต็ม = ทุกการ์ดเหมือนเดิม · แบบง่าย = ภาพรวม + จุดแวะ + ตารางเวลา ส่วนที่เหลือรวมไว้ใต้ "เครื่องมือเพิ่มเติม"
   const parts = {}; { const a = html.split(/<!--C:(\w+)-->/); for (let i = 1; i < a.length; i += 2) parts[a[i]] = a[i+1]; }
   const modebar = `<div class="modebar"><div class="seg"><button data-ui="simple" class="${simple ? "on" : ""}">🙂 แบบง่าย</button><button data-ui="full" class="${simple ? "" : "on"}">🔧 แบบเต็ม</button></div><span style="display:flex;gap:6px"><button class="b ${showLabels ? "p" : ""}" id="lblBtn">🏷 ชื่อบนแผนที่</button><button class="b" id="helpBtn">❓</button></span></div>`;
+  const syncBar = (sync && guest) ? syncBarHtml() : "";
   let out;
-  if (!simple) out = modebar + ["hero", "sched", "stops", "sum", "veh", "rec", "share", "adv"].map(k => parts[k] || "").join("");
+  if (!simple) out = syncBar + modebar + ["hero", "sched", "stops", "sum", "veh", "rec", "adv"].map(k => parts[k] || "").join("");
   else {
     const fuelLine = plan.unset ? "" : `<div class="meta" style="margin-top:8px">${isEV ? "⚡" : "⛽"} ${plan.events.length ? "ต้อง" + (isEV ? "ชาร์จ" : "เติมน้ำมัน") + " " + plan.events.length + " ครั้งระหว่างทาง (ดูใน เครื่องมือเพิ่มเติม)" : "ไม่ต้อง" + (isEV ? "ชาร์จ" : "เติมน้ำมัน") + "ระหว่างทาง"}</div>`;
     const sumSimple = `<div class="card"><h2>📊 สรุปวันนี้</h2>
@@ -841,11 +833,12 @@ async function draw(day, picks, pts, seq, plan){
       </div>${fuelLine}</div>`;
     const tlCard = `<div class="card"><h2>🕘 ตารางเวลาวันนี้</h2><ul class="tl" style="margin-top:0">${tl}</ul></div>`;
     const tips = tipsSeen ? "" : `<div class="card tip"><b>วิธีใช้ใน 3 ขั้นตอน</b><ol><li>เลือกวันจากแท็บด้านบน</li><li>ติ๊กจุดแวะที่อยากแวะ</li><li>ดูเวลาและเส้นทางในตารางเวลา และบนแผนที่</li></ol><button class="b p" id="tipsOk">เข้าใจแล้ว</button></div>`;
-    out = modebar + tips + parts.hero + sumSimple + parts.stops + tlCard
-      + `<div class="card"><h2 id="extrasToggle" data-nofold data-open="${extrasOpen ? 1 : 0}" style="margin-bottom:-14px;border-radius:13px">🧰 เครื่องมือเพิ่มเติม <span style="font-weight:400;font-size:13px">แก้กำหนดการ · รถ/ชาร์จ · แนะนำสถานที่ · แชร์</span></h2></div>`
-      + `<div id="extras" ${extrasOpen ? "" : "hidden"}>` + ["sched", "veh", "rec", "share", "adv"].map(k => parts[k] || "").join("") + `</div>`;
+    out = syncBar + modebar + tips + parts.hero + sumSimple + parts.stops + tlCard
+      + `<div class="card"><h2 id="extrasToggle" data-nofold data-open="${extrasOpen ? 1 : 0}" style="margin-bottom:-14px;border-radius:13px">🧰 เครื่องมือเพิ่มเติม <span style="font-weight:400;font-size:13px">แก้กำหนดการ · รถ/ชาร์จ · แนะนำสถานที่</span></h2></div>`
+      + `<div id="extras" ${extrasOpen ? "" : "hidden"}>` + ["sched", "veh", "rec", "adv"].map(k => parts[k] || "").join("") + `</div>`;
   }
   $("#panel").innerHTML = out;
+  bindSyncBar();
   resolveEvLabels(plan.events, pathAll);          // แปลงตำแหน่งจุดเติมเป็นชื่ออำเภอ/จังหวัด (ทำเบื้องหลัง)
 
   // events
@@ -895,9 +888,7 @@ async function draw(day, picks, pts, seq, plan){
   });
   if ($("#dayFill")) $("#dayFill").onchange = e => { day.fill = e.target.value; saveTrip(); update(); };
   refreshGoogleUI();
-  if ($("#recSet")) $("#recSet").onclick = e => { e.preventDefault(); openSettings(); };
-  if ($("#shLink")){ $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile; }
-  $("#shSync").onclick = openSync;
+  if ($("#recSet")) $("#recSet").onclick = e => { e.preventDefault(); openSettings("google"); };
   applyFolds();
   const myDraw = reqId;
   const ok = await mapP;
@@ -1002,7 +993,7 @@ function openHelp(){
       <li>เลือก <b>วัน</b> จากแท็บด้านบน</li>
       <li><b>ติ๊กจุดแวะ</b> ที่อยากแวะ เวลาและเส้นทางจะอัปเดตเอง</li>
       <li>ดู <b>ตารางเวลา</b> และเส้นทางบนแผนที่ (ใส่เวลาออกเดินทางเพื่อดูเวลาถึง)</li>
-      <li>ต้องการเพิ่ม/แก้อย่างอื่น เปิด <b>🧰 เครื่องมือเพิ่มเติม</b></li>
+      <li>ต้องการเพิ่ม/แก้อย่างอื่น เปิด <b>🧰 เครื่องมือเพิ่มเติม</b> · แชร์/สำรองแผนอยู่ที่ <b>⚙️ ตั้งค่า</b></li>
     </ol>
     <div class="cat">ความหมายของหมุดบนแผนที่</div>
     <div class="meta" style="line-height:1.9">▶ จุดเริ่มต้น · ⚑ ปลายทาง · ★ จุดหมายหลัก (ต้องไป) · 🛏 ที่พัก<br>เลข 1 2 3 = จุดแวะที่เลือก (เรียงตามลำดับ) · • จุดแวะที่ยังไม่เลือก<br>⚡⛽ = จุดเติมน้ำมัน/ชาร์จแบต</div>
@@ -1597,7 +1588,7 @@ async function shareLink(){
     exportFile(); return;
   }
   const url = location.href.split("#")[0] + "#plan=" + encodeURIComponent(b64enc(JSON.stringify(planObj(false))));
-  openLinkBox("ลิงก์ภาพของแผนทริป", url, "นี่คือภาพของแผน ณ ตอนนี้ (ไม่รวมข้อมูลรถ และไม่ซิงก์กับเครื่องนี้) ถ้าอยากให้เห็นการแก้ไขตรงกัน ให้ใช้ปุ่ม \"แชร์ร่วมกัน\" แล้วส่งลิงก์เชิญแทน");
+  openLinkBox("ลิงก์ภาพของแผนทริป", url, "นี่คือภาพของแผน ณ ตอนนี้ (ไม่รวมข้อมูลรถ และไม่ซิงก์กับเครื่องนี้) ถ้าอยากให้เห็นการแก้ไขตรงกัน ให้ใช้ ⚙️ ตั้งค่า → แชร์และสำรองแผน → ลิงก์เชิญ แทน");
 }
 function importFromHash(){
   const j = location.hash.match(/^#join=(.+)$/);
@@ -1643,16 +1634,37 @@ function setRole(r){ role = r; ls.set("trip.role.v1", r); applyRoleUI(); }
 let cid = ls.get("trip.cid.v1", ""); if (!cid){ cid = randId(10); ls.set("trip.cid.v1", cid); }
 const docUrl = () => `${sync.db}/trips/${sync.id}.json`;
 function normDb(u){ u = String(u || "").trim().replace(/\/+$/, ""); return FB_RE.test(u) ? u : null; }
-function setStat(){
+const tripCode = () => sync ? sync.id.slice(-4).toUpperCase() : "";     // รหัสทริปสั้น ๆ ไว้เทียบว่าสองเครื่องอยู่ทริปเดียวกันไหม
+const hms = ms => ms ? new Date(ms).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit", second:"2-digit" }) : "-";
+function changedAtText(){
+  if (!(lastRev > 1e12)) return "-";
+  const d = new Date(lastRev), today = new Date().toDateString() === d.toDateString();
+  return (today ? "" : d.toLocaleDateString("th-TH", { day:"numeric", month:"short" }) + " ") + d.toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" });
+}
+// แถบสถานะข้อมูลสำหรับผู้ร่วมทริป (เว็บที่เปิดจากลิงก์)
+function syncBarText(){
+  const state = tkeyNeeded ? "🔒 ต้องใส่รหัสผ่านทริป" : syncErr ? "⚠ ติดต่อเซิร์ฟเวอร์ไม่ได้" : "🟢 ข้อมูลเป็นปัจจุบัน";
+  return `<b>${state}</b> · รหัสทริป <b>${tripCode()}</b><div class="meta">เช็กล่าสุด ${hms(lastCheckAt)} · แผนถูกแก้ล่าสุด ${changedAtText()}</div>`;
+}
+const syncBarHtml = () => `<div class="card syncbar" id="syncBar"><div id="sbText">${syncBarText()}</div>
+  <div class="row" style="margin-top:6px"><button class="b p" id="sbSync" style="padding:6px 12px">🔄 ซิงก์ตอนนี้</button>${tkeyNeeded ? `<button class="b" id="sbKey" style="padding:6px 12px">🔒 ใส่รหัสผ่าน</button>` : ""}<button class="b" id="sbLeave" style="padding:6px 12px">ออกจากทริปร่วม</button></div></div>`;
+function updateSyncBar(){ const t = $("#sbText"); if (t) t.innerHTML = syncBarText(); }
+function bindSyncBar(){
+  if ($("#sbSync")) $("#sbSync").onclick = async () => { const b = $("#sbSync"); b.disabled = true; b.textContent = "กำลังซิงก์…"; await syncNow(); if ($("#sbSync")){ b.disabled = false; b.textContent = "🔄 ซิงก์ตอนนี้"; } updateSyncBar(); };
+  if ($("#sbKey")) $("#sbKey").onclick = () => { tkAsked = true; promptUnlock(); };
+  if ($("#sbLeave")) $("#sbLeave").onclick = () => { if (confirm("ออกจากทริปร่วม? แผนที่เห็นตอนนี้จะอยู่ในเครื่องนี้ต่อ แต่จะไม่อัปเดตกับกลุ่มอีก")){ leaveSync(); if (trip.days.length) update(); else renderEmpty(); } };
+}
+function setStat(){ setStatText(); updateSyncBar(); }
+function setStatText(){
   const e = $("#syncStat"); if (!e) return;
   if (!sync){ e.textContent = ""; return; }
   if (tkeyNeeded){
-    e.innerHTML = '🔒 ทริปนี้ตั้งรหัสผ่านไว้ <a href="#" id="tkLink">ใส่รหัสผ่านเพื่อดูแผนล่าสุด</a>';
+    e.innerHTML = '🔒 ทริปนี้ตั้งรหัสผ่านไว้ <a href="#" id="tkLink">ใส่รหัสผ่านเพื่อดูแผนล่าสุด</a> · รหัสทริป ' + tripCode();
     const a = $("#tkLink"); if (a) a.onclick = ev => { ev.preventDefault(); tkAsked = true; promptUnlock(); };
     return;
   }
   e.textContent = syncErr ? "⚠ แชร์ร่วมกัน: ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่)"
-    : "🟢 แชร์ร่วมกัน: เปิดอยู่" + (ctl && ctl.enc ? " · 🔐" : "") + (lastSyncAt ? " · ซิงก์ล่าสุด " + new Date(lastSyncAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" }) : "");
+    : "🟢 แชร์ร่วมกัน: เปิดอยู่" + (ctl && ctl.enc ? " · 🔐" : "") + " · รหัสทริป " + tripCode() + (lastSyncAt ? " · ซิงก์ล่าสุด " + new Date(lastSyncAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit" }) : "");
 }
 function inviteCode(){ return b64enc(JSON.stringify({ db: sync.db, id: sync.id })); }
 function inviteLink(){ return location.href.split("#")[0] + "#join=" + encodeURIComponent(inviteCode()); }
@@ -1668,7 +1680,7 @@ function parseInvite(t){
 // ส่งเฉพาะส่วนที่เปลี่ยน (แผน / จุดแวะที่เลือก / เวลาแวะ / เวลาออกเดินทาง / ข้อมูลรถ) ไม่เขียนทับส่วนอื่นที่คนอื่นเพิ่งแก้
 const PLAN_FIELD = { "trip.data.v1":"trip", "trip.sel.v1":"sel", "trip.stay.v1":"stays", "trip.dep.v1":"departs", "trip.veh.v1":"veh" };
 const dirtyFields = new Set();
-let lastSyncAt = 0, lastTypeAt = 0;
+let lastSyncAt = 0, lastTypeAt = 0, lastCheckAt = 0;
 document.addEventListener("input", () => { lastTypeAt = Date.now(); }, true);
 function schedulePush(key){
   if (!sync || syncApplying) return;
@@ -1677,7 +1689,7 @@ function schedulePush(key){
 }
 async function pushNow(){
   if (!sync || !dirtyFields.size) return;
-  const fields = [...dirtyFields]; dirtyFields.clear();
+  let fields = [...dirtyFields]; dirtyFields.clear();
   let enc = null;
   try{      // ถ้ามีคนอื่นแก้ไปแล้วระหว่างนี้ ดึงของเขามารวมก่อน (ส่วนที่เราแก้เองยังเป็นของเรา) แล้วค่อยส่ง
     enc = await fetchJSON(`${sync.db}/trips/${sync.id}/ctl/enc.json`, 8000);
@@ -1686,10 +1698,16 @@ async function pushNow(){
     const remoteRev = await fetchJSON(`${sync.db}/trips/${sync.id}/rev.json`, 8000);
     if (typeof remoteRev === "number" && remoteRev !== lastRev){
       const doc = await fetchJSON(docUrl(), 10000);
-      if (doc && doc.by !== cid){ lastRev = doc.rev; await applyRemote(doc, new Set(fields)); }
+      if (doc && doc.by !== cid){
+        // มีคนอื่นแก้ไปแล้วที่เครื่องนี้ยังไม่ได้รับ: ส่วน "แผน" (ทั้งก้อน) ใช้ของที่เซิร์ฟเวอร์ ไม่ส่งของเก่าไปทับ ส่วนอื่นยังเป็นของเรา
+        lastRev = doc.rev; const hadTrip = fields.includes("trip");
+        const ok = await applyRemote(doc, new Set(fields.filter(f => f !== "trip")));
+        if (ok && hadTrip){ fields = fields.filter(f => f !== "trip"); flash("แผนถูกแก้จากเครื่องอื่นไปก่อนแล้ว ระบบดึงข้อมูลล่าสุดมาแทน การแก้ไขล่าสุดของคุณถูกยกเลิก กรุณาแก้ซ้ำอีกครั้ง", 6000); }
+      }
       else if (doc) lastRev = doc.rev;
     }
   }catch(e){}
+  if (!fields.length){ setStat(); return; }
   const val = { trip, sel, stays, departs, veh }, body = { rev: Math.max(Date.now(), lastRev + 1), by: cid };
   try{
     for (const f of fields) body["plan/" + f] = tkey ? await aesEnc(tkey.key, JSON.stringify(val[f])) : val[f];
@@ -1741,7 +1759,7 @@ async function syncTick(){
       tkeyNeeded = true; if (!tkAsked){ tkAsked = true; promptUnlock(); }
     } else if (ctl.enc) tkeyNeeded = false;
     else { if (tkey) clearTkey(); tkeyNeeded = false; }
-    syncErr = false;
+    syncErr = false; lastCheckAt = Date.now();
   }catch(e){ syncErr = true; }
   syncBusy = false; setStat();
 }
@@ -1774,6 +1792,24 @@ async function joinSync(db, id){
     setRole("guest"); await applyRemote(doc); setStat(); syncTick(); return true;
   }catch(e){ alert("เข้าร่วมไม่สำเร็จ ตรวจอินเทอร์เน็ตและลิงก์เชิญ"); return false; }
 }
+// ซิงก์ทันที: ส่งสิ่งที่ค้างอยู่ แล้วดึงข้อมูลล่าสุดจากกลุ่ม
+async function syncNow(){
+  if (!sync) return;
+  if (dirtyFields.size){ clearTimeout(pushTimer); await pushNow(); }
+  lastRev = -1; syncBusy = false; await syncTick();
+  flash(syncErr ? "ซิงก์ไม่สำเร็จ (ติดต่อเซิร์ฟเวอร์ไม่ได้)" : "ซิงก์แล้ว ข้อมูลเป็นล่าสุด");
+}
+// ดึงข้อมูลล่าสุดจากกลุ่มมาแทนที่ข้อมูลในเครื่องนี้ (ใช้เมื่อสองเครื่องไม่ตรงกัน)
+async function forcePull(){
+  if (!sync) return;
+  if (!confirm("ดึงข้อมูลล่าสุดจากกลุ่มมาแทนที่แผนในเครื่องนี้? (สิ่งที่แก้ในเครื่องนี้แต่ยังไม่ได้ส่งจะหายไป)")) return;
+  try{
+    const doc = await fetchJSON(docUrl(), 10000);
+    if (!doc || !doc.plan){ alert("ไม่พบข้อมูลของทริปนี้บนเซิร์ฟเวอร์"); return; }
+    dirtyFields.clear(); clearTimeout(pushTimer);
+    if (await applyRemote(doc)){ lastRev = doc.rev; lastSyncAt = Date.now(); setStat(); flash("ดึงข้อมูลล่าสุดแล้ว"); }
+  }catch(e){ alert("ดึงข้อมูลไม่สำเร็จ ตรวจอินเทอร์เน็ต"); }
+}
 function leaveSync(){
   sync = null; ls.set("trip.sync.v1", null); clearTimeout(pushTimer); ctl = null; clearTkey();
   if (gsrc === "group") dropGroupKey();           // key ที่ได้มาจากกลุ่ม ต้องออกจากเครื่องเมื่อออกจากกลุ่ม
@@ -1789,9 +1825,9 @@ async function copyToClipboard(t){
     const ok = document.execCommand("copy"); ta.remove(); return ok;
   }catch(e){ return false; }
 }
-function flash(msg){
+function flash(msg, ms = 2400){
   const t = $("#toast"); if (!t || pickMode) return;
-  t.hidden = false; t.textContent = msg; clearTimeout(flash.tm); flash.tm = setTimeout(() => { if (!pickMode) t.hidden = true; }, 2400);
+  t.hidden = false; t.textContent = msg; clearTimeout(flash.tm); flash.tm = setTimeout(() => { if (!pickMode) t.hidden = true; }, ms);
 }
 // หน้าต่างแสดงลิงก์/รหัส: เลือกข้อความให้แล้ว มีปุ่มคัดลอกและส่งผ่านแอป (ถ้าคัดลอกอัตโนมัติไม่ได้ ก็คัดลอกเองได้จากช่องนี้)
 function openLinkBox(title, text, hint){
@@ -1815,12 +1851,17 @@ function openLinkBox(title, text, hint){
 async function copyText(t, okMsg){
   if (await copyToClipboard(t)) flash(okMsg || "คัดลอกแล้ว"); else openLinkBox("คัดลอกข้อความนี้ด้วยตัวเอง", t);
 }
-function openSync(){
-  const m = $("#modal"); m.hidden = false;
+const openSync = () => openSettings("share");        // การแชร์ทั้งหมดอยู่ใน ⚙️ ตั้งค่า ที่เดียว
+function renderSync(){
+  const box = $("#syncBox"); if (!box) return;
   const hosted = location.protocol !== "file:";
   if (sync){
-    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แชร์ร่วมกัน</h2>
-      <p><b>${syncErr ? "⚠ ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่เอง)" : "🟢 เปิดอยู่"}</b></p>
+    box.innerHTML = `<div>
+      <p><b>${syncErr ? "⚠ ติดต่อเซิร์ฟเวอร์ไม่ได้ (จะลองใหม่เอง)" : "🟢 เปิดอยู่"}</b>
+        <span class="meta"> · ซิงก์ล่าสุด ${lastSyncAt ? new Date(lastSyncAt).toLocaleTimeString("th-TH", { hour:"2-digit", minute:"2-digit", second:"2-digit" }) : "ยังไม่มี (หลังเปิดหน้านี้)"}</span></p>
+      <div class="pill" style="display:inline-block;font-size:15px;letter-spacing:1px">รหัสทริป: ${tripCode()}</div>
+      <p class="meta" style="margin:4px 0 8px">ทุกเครื่องในทริปเดียวกันต้องเห็น "รหัสทริป" ตัวเดียวกันนี้ ถ้าไม่ตรงกัน แปลว่าอยู่คนละทริปร่วม ให้ออกจากทริปร่วมแล้วเข้าร่วมด้วยลิงก์เชิญปัจจุบัน</p>
+      <div class="row"><button class="b p" id="sySync">🔄 ซิงก์ตอนนี้</button><button class="b" id="syPull">⬇️ ดึงข้อมูลล่าสุดมาแทนในเครื่องนี้</button></div>
       <p class="meta">ทุกคนที่มีลิงก์เชิญ เพิ่ม/แก้/ลบแผนได้ และทุกเครื่องจะเห็นการเปลี่ยนแปลง (อัปเดตทุกประมาณ 5 วินาที)
         ถ้าสองคนแก้พร้อมกัน ฉบับที่บันทึกทีหลังจะทับฉบับก่อน ควรแจ้งกันก่อนแก้ครั้งใหญ่</p>
       <div class="row">
@@ -1836,23 +1877,25 @@ function openSync(){
       <input class="f" id="tppw2" type="password" placeholder="พิมพ์รหัสผ่านอีกครั้ง" autocomplete="new-password" style="margin-top:6px">
       <div class="row"><button class="b p" id="tpset">${ctl && ctl.enc ? "เปลี่ยนรหัสผ่าน" : "ตั้งรหัสผ่าน"}</button>${ctl && ctl.enc ? `<button class="b" id="tpoff">ยกเลิกรหัสผ่าน</button>` : ""}</div>
       <p class="meta">ลืมรหัสผ่านแล้วกู้ข้อมูลที่ซิงก์ไม่ได้ (แผนในเครื่องคุณยังอยู่ ควรดาวน์โหลดไฟล์สำรองไว้) รหัสผ่านไม่ได้อยู่ในลิงก์เชิญ ต้องบอกผู้ร่วมทริปแยกต่างหาก</p>`}
-      <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ ${isGuest() ? "ออกจากทริปร่วม" : "เลิกซิงก์"} (เก็บแผนไว้ในเครื่อง)</button><button class="b" id="sx">ปิด</button></div></div>`;
+      <div class="row"><button class="b" id="syOff" style="color:var(--red)">⛔ ${isGuest() ? "ออกจากทริปร่วม" : "เลิกซิงก์"} (เก็บแผนไว้ในเครื่อง)</button></div></div>`;
     if ($("#syShare")) $("#syShare").onclick = () => openLinkBox("ลิงก์เชิญเข้าร่วมทริป", inviteLink(), "ส่งลิงก์นี้ให้ผู้ร่วมทริป เปิดลิงก์แล้วตอบตกลงเพื่อเข้าร่วม (ต้องเป็นลิงก์นี้ ไม่ใช่ลิงก์ภาพของแผน)" + (ctl && ctl.enc ? " ทริปนี้ตั้งรหัสผ่านไว้ ผู้รับต้องใช้รหัสผ่านที่คุณบอกแยกต่างหาก" : ""));
+    $("#sySync").onclick = async () => { const b = $("#sySync"); b.disabled = true; b.textContent = "กำลังซิงก์…"; await syncNow(); renderSync(); };
+    $("#syPull").onclick = async () => { await forcePull(); renderSync(); };
     if ($("#tpset")) $("#tpset").onclick = async () => {
       const a = $("#tppw").value, b2 = $("#tppw2").value;
       if (a !== b2){ alert("รหัสผ่านสองช่องไม่ตรงกัน"); return; }
       const btn = $("#tpset"); btn.disabled = true; btn.textContent = "กำลังเข้ารหัส…";
-      try{ await setTripPassword(a); alert("ตั้งรหัสผ่านทริปแล้ว ผู้ร่วมทริปจะถูกขอรหัสผ่านเมื่อเปิดเว็บครั้งถัดไป อย่าลืมบอกรหัสผ่านเขา"); openSync(); }
+      try{ await setTripPassword(a); alert("ตั้งรหัสผ่านทริปแล้ว ผู้ร่วมทริปจะถูกขอรหัสผ่านเมื่อเปิดเว็บครั้งถัดไป อย่าลืมบอกรหัสผ่านเขา"); renderSync(); }
       catch(x){ alert("ตั้งรหัสผ่านไม่สำเร็จ: " + (x.message || x)); btn.disabled = false; btn.textContent = "ตั้งรหัสผ่าน"; }
     };
     if ($("#tpoff")) $("#tpoff").onclick = async () => {
       if (!confirm("ยกเลิกรหัสผ่านทริป? ข้อมูลทริปใน Firebase จะไม่เข้ารหัส ใครมีลิงก์ก็อ่านได้")) return;
-      try{ await removeTripPassword(); openSync(); }catch(x){ alert("ไม่สำเร็จ: " + (x.message || x)); }
+      try{ await removeTripPassword(); renderSync(); }catch(x){ alert("ไม่สำเร็จ: " + (x.message || x)); }
     };
     $("#syCode").onclick = () => openLinkBox("รหัสเชิญเข้าร่วมทริป", inviteCode(), "ใช้เมื่อส่งลิงก์ไม่ได้ ให้ผู้ร่วมทริปวางรหัสนี้ในช่อง \"เข้าร่วมทริปที่มีคนเชิญ\" (ปุ่ม แชร์ร่วมกัน)");
     $("#syOff").onclick = () => { if (confirm("เลิกซิงก์? แผนที่เห็นตอนนี้จะอยู่ในเครื่องนี้ต่อ แต่จะไม่อัปเดตกับกลุ่มอีก")){ leaveSync(); closeModal(); } };
   } else {
-    m.innerHTML = `<div class="mbox"><h2>👨‍👩‍👧 แชร์ร่วมกัน</h2>
+    box.innerHTML = `<div>
       <p class="meta">ให้ทุกคนในทริปเห็นและแก้แผนเดียวกัน ต้องมีฐานข้อมูลกลางฟรีของ Firebase (ตั้งครั้งเดียว ใช้เวลาประมาณ 5 นาที)</p>
       <div class="cat" style="margin-top:6px">🅰 เริ่มทริปร่วมใหม่ (คนตั้งค่า)</div>
       <input class="f" id="sdb" placeholder="ที่อยู่ Realtime Database เช่น https://ชื่อ-default-rtdb.asia-southeast1.firebasedatabase.app" value="${esc(ls.get("trip.db.v1", ""))}" autocomplete="off" style="margin-top:6px">
@@ -1873,22 +1916,20 @@ function openSync(){
       </details>
       <div class="cat">🅱 เข้าร่วมทริปที่มีคนเชิญ</div>
       <input class="f" id="sinv" placeholder="วางลิงก์เชิญ หรือรหัสเชิญ" autocomplete="off" style="margin-top:6px">
-      <div class="row"><button class="b p" id="sjoin">เข้าร่วม</button><button class="b" id="sx">ปิด</button></div></div>`;
+      <div class="row"><button class="b p" id="sjoin">เข้าร่วม</button></div></div>`;
     $("#srcopy").onclick = () => copyText(FB_RULES, "คัดลอก Rules แล้ว");
     $("#sgo").onclick = async () => {
       if (!trip.days.length && !confirm("ตอนนี้ยังไม่มีแผน สร้างทริปร่วมเปล่าเลยไหม?")) return;
       const pw = $("#sdpw").value;
       if (pw !== $("#sdpw2").value){ alert("รหัสผ่านสองช่องไม่ตรงกัน"); return; }
       const b = $("#sgo"); b.disabled = true; b.textContent = "กำลังสร้าง…";
-      if (await startSync($("#sdb").value, pw)){ openSync(); } else { b.disabled = false; b.textContent = "สร้างทริปร่วมจากแผนนี้"; }
+      if (await startSync($("#sdb").value, pw)){ renderSync(); } else { b.disabled = false; b.textContent = "สร้างทริปร่วมจากแผนนี้"; }
     };
     $("#sjoin").onclick = async () => {
       const inv = parseInvite($("#sinv").value); if (!inv){ alert("ลิงก์หรือรหัสเชิญไม่ถูกต้อง"); return; }
       if (await joinSync(inv.db, inv.id)) closeModal();
     };
   }
-  $("#sx").onclick = closeModal;
-  m.onclick = e => { if (e.target === m) closeModal(); };
 }
 function initSync(){
   globalThis.__syncHook = schedulePush;
@@ -1981,7 +2022,7 @@ async function saveCfg(patch){
   refreshGoogleUI();
 }
 async function shareGoogleKey(pw){
-  if (!sync) throw new Error("ต้องเปิด \"แชร์ร่วมกัน\" ก่อน");
+  if (!sync) throw new Error("ต้องเปิดแชร์ร่วมกัน (⚙️ ตั้งค่า → แชร์และสำรองแผน) ก่อน");
   if (!gkey) throw new Error("ยังไม่ได้ตั้ง Google API key ในเครื่องนี้");
   if (!(window.crypto && crypto.subtle)) throw new Error("เบราว์เซอร์นี้ไม่รองรับการเข้ารหัส (ต้องเปิดผ่านเว็บ https)");
   if (String(pw).length < 10) throw new Error("รหัสผ่านต้องยาวอย่างน้อย 10 ตัวอักษร");
@@ -2094,7 +2135,7 @@ async function promptUnlock(){
   if (key){ tkey = { id: sync.id, s: enc.s, key }; await storeTkey(); tkeyNeeded = false; setStat(); syncTick(); }
 }
 async function setTripPassword(pw){
-  if (!sync) throw new Error("ต้องเปิด \"แชร์ร่วมกัน\" ก่อน");
+  if (!sync) throw new Error("ต้องเปิดแชร์ร่วมกัน (⚙️ ตั้งค่า → แชร์และสำรองแผน) ก่อน");
   if (String(pw).length < 6) throw new Error("รหัสผ่านต้องยาวอย่างน้อย 6 ตัวอักษร");
   const e = await makeEnc(pw), plan = await encPlan(e.key), rev = Math.max(Date.now(), lastRev + 1);
   const body = { rev, by: cid, "ctl/enc": e.meta }; Object.keys(plan).forEach(f => { body["plan/" + f] = plan[f]; });
@@ -2113,16 +2154,19 @@ async function removeTripPassword(){
 }
 
 /* ---------- เมนูตั้งค่า ---------- */
-function openSettings(){
+function openSettings(section){
   if (isGuest()) return;
   const m = $("#modal"); m.hidden = false;
   const mask = k => k ? "ตั้งค่าแล้ว (••••" + k.slice(-4) + ")" : "ยังไม่ได้ตั้งค่า";
+  const op = k => (section || "share") === k ? "open" : "";
   m.innerHTML = `<div class="mbox"><h2>⚙️ ตั้งค่า</h2>
-    <div class="cat" style="margin-top:4px">🎨 ธีม</div>
-    <select class="f" id="thsel" style="margin-top:6px">
-      <option value="light">☀️ สว่าง (สีขาว)</option>
-      <option value="dark">🌙 มืด</option>
-      <option value="auto">🖥 ตามการตั้งค่าของเครื่อง</option></select>
+    <details class="sec" ${op("share")}><summary>👨‍👩‍👧 แชร์และสำรองแผน ${sync ? "🟢" : ""}</summary>
+      <div id="syncBox"></div>
+      <div class="cat">📦 ส่งภาพของแผน / สำรอง</div>
+      <p class="meta" style="margin:2px 0 6px">ภาพของแผน ณ ตอนนี้ (ไม่ซิงก์) หรือไฟล์สำรอง ผู้รับกด "นำเข้าแผน" เพื่อเปิดแผนเดียวกัน (ไม่รวม API key)</p>
+      <div class="row"><button class="b" id="shLink">🔗 ลิงก์ภาพของแผน</button><button class="b" id="shFile">⬇️ ดาวน์โหลดไฟล์แผน</button><button class="b" id="shImp">⬆️ นำเข้าแผน</button></div>
+    </details>
+    <details class="sec" ${op("google")}><summary>🔑 Google (key · การใช้งาน · แชร์ key)</summary>
     <div class="cat">🔑 Google API key (ไม่บังคับ)</div>
     <p class="meta" style="margin:4px 0 8px">ใช้แสดงคะแนนรีวิวและรูปในรายการแนะนำสถานที่ (Places API (New)) และใช้แสดง Google Maps (Maps JavaScript API)
       ต้องเปิดใช้ API ที่ต้องการใน Google Cloud และ Google คิดค่าบริการตามการใช้งานหลังเกินโควตาฟรี รูปภาพจาก Google คิดค่าบริการแยกต่างหาก ควรเช็กราคาและตั้ง Budget alert/Quota ไว้</p>
@@ -2146,17 +2190,29 @@ function openSettings(){
       <div class="meta" id="gshst">${cfgNow().gid ? "🟢 แชร์ key ให้กลุ่มอยู่" : "ยังไม่ได้แชร์ key"}</div>
       <input class="f" id="gpw" type="password" placeholder="ตั้งรหัสผ่าน (ยาวอย่างน้อย 10 ตัวอักษร)" autocomplete="off" style="margin-top:6px">
       <div class="row"><button class="b p" id="gshare">เข้ารหัสและแชร์ key</button><button class="b" id="gunshare">ยกเลิกการแชร์ key</button></div>`
-      : `<p class="meta">เปิด "แชร์ร่วมกัน" ก่อน จึงจะแชร์ key ให้ผู้ร่วมทริปได้</p>`}
+      : `<p class="meta">เปิดแชร์ร่วมกัน (ส่วน "แชร์และสำรองแผน" ด้านบน) ก่อน จึงจะแชร์ key ให้ผู้ร่วมทริปได้</p>`}
+    </details>
+    <details class="sec" ${op("map")}><summary>🎨 ธีมและแผนที่</summary>
+    <div class="cat" style="margin-top:4px">🎨 ธีม</div>
+    <select class="f" id="thsel" style="margin-top:6px">
+      <option value="light">☀️ สว่าง (สีขาว)</option>
+      <option value="dark">🌙 มืด</option>
+      <option value="auto">🖥 ตามการตั้งค่าของเครื่อง</option></select>
     <div class="cat">🗺️ แผนที่</div>
     <select class="f" id="mapsel" style="margin-top:6px">
       <option value="osm">แผนที่ปกติ (ฟรี ไม่ต้องใช้ key)</option>
       <option value="google">Google Maps (ต้องมี key และเปิด Maps JavaScript API)</option></select>
     <div class="meta" id="mapnote" style="margin-top:4px">${esc(mapNote)}</div>
+    </details>
+    <details class="sec" ${op("data")}><summary>🧹 ข้อมูลในเครื่อง</summary>
     <div class="cat">🧹 ข้อมูลที่จำไว้ในเครื่อง</div>
     <div class="row"><button class="b" id="gcache">ล้างแคชเส้นทาง/ปั๊ม/สถานที่แนะนำ</button>
       <button class="b" id="gall" style="color:var(--red)">🗑 ล้างกำหนดการและข้อมูลรถทั้งหมด</button></div>
+    </details>
     <div class="row" style="margin-top:14px"><button class="b" id="gx">ปิด</button></div>
 </div>`;
+  $("#shLink").onclick = shareLink; $("#shFile").onclick = exportFile; $("#shImp").onclick = importFile;
+  renderSync();
   $("#thsel").value = theme; $("#thsel").onchange = e => setTheme(e.target.value);
   $("#mapsel").value = mapPref;
   $("#mapsel").onchange = e => {
@@ -2345,7 +2401,8 @@ function setTheme(t){
 }
 $("#themeBtn").onclick = () => setTheme({ light:"dark", dark:"auto", auto:"light" }[theme]);
 setTheme(theme);
-$("#setBtn").onclick = openSettings;
+$("#setBtn").onclick = () => openSettings();
+$("#syncStat").onclick = () => { if (sync && !isGuest()) openSettings("share"); };
 // ซ่อน/แสดงแผงด้านขวา (ให้แผนที่เต็มหน้าจอ)
 let panelHidden = ls.get("trip.panelhidden.v1", false);
 function applyPanel(){
